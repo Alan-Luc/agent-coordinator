@@ -1,0 +1,141 @@
+package tmux
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestPrivateServerCreateInspectRemove(t *testing.T) {
+	for _, locale := range []string{"C", "en_US.UTF-8"} {
+		t.Run(locale, func(t *testing.T) {
+			t.Setenv("LC_ALL", locale)
+			checkPrivateServerCreateInspectRemove(t)
+		})
+	}
+}
+
+func checkPrivateServerCreateInspectRemove(t *testing.T) {
+	t.Helper()
+	tmuxPath, err := execLookPath("tmux")
+	if err != nil {
+		t.Skip("tmux unavailable")
+	}
+	root, err := os.MkdirTemp("/tmp", "ac-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "s")
+	configPath := filepath.Join(root, "tmux.conf")
+	if err := os.WriteFile(configPath, []byte(Config("owner", "job123", "work-job")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(root, "launcher")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: tmuxPath}
+	session := "ac-job123"
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, session) })
+	if err := client.ValidateVersion(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Create(context.Background(), CreateOptions{Socket: socket, Config: configPath, Session: session, Executable: launcher, JobID: "job123", RuntimeDir: root, Env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TERM=xterm-256color", "AC_OWNER=owner", "AC_JOB=job123"}, Width: 100, Height: 30}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.Inspect(context.Background(), socket, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Owner != "owner" || snapshot.Job != "job123" || snapshot.Protocol != "1" || snapshot.Session != session || snapshot.PaneID == "" || snapshot.Width != 100 || snapshot.Height != 30 {
+		t.Fatalf("unexpected private session facts: %+v", snapshot)
+	}
+	rootKeys, err := client.command(context.Background(), "-S", socket, "-N", "list-keys", "-T", "root")
+	if err != nil || strings.TrimSpace(string(rootKeys)) != "bind-key -T root F12 detach-client" {
+		t.Fatalf("unexpected root key bindings: %q, %v", rootKeys, err)
+	}
+	if _, err := client.command(context.Background(), "-S", socket, "-N", "list-keys", "-T", "prefix"); err == nil {
+		t.Fatal("default prefix key bindings remain")
+	}
+	status, err := client.command(context.Background(), "-S", socket, "-N", "show-option", "-gqv", "status-left")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"Observe", "Enter", "work-job", "session_attached"} {
+		if !strings.Contains(string(status), fragment) {
+			t.Errorf("status missing %q: %q", fragment, status)
+		}
+	}
+	if err := client.Remove(context.Background(), socket, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Inspect(context.Background(), socket, session); err == nil {
+		t.Fatal("inspection succeeded after last session was removed")
+	}
+}
+
+func TestCreateKeepsInternalEnvironmentOutOfArgv(t *testing.T) {
+	root := t.TempDir()
+	capture := filepath.Join(root, "argv")
+	fakeTmux := filepath.Join(root, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: fakeTmux}
+	if err := client.Create(context.Background(), CreateOptions{Socket: "/private/socket", Config: filepath.Join(root, "config"), Session: "ac-job", Executable: "/private/bin/agent", JobID: "job", RuntimeDir: root, Env: []string{"CAPTURE=" + capture, "AC_OWNER=owner", "AC_JOB=job"}, Width: 80, Height: 24}); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(argv), "-e\n") || strings.Contains(string(argv), "AC_JOB=") || strings.Contains(string(argv), "AC_OWNER=") {
+		t.Fatalf("internal environment leaked into argv: %q", argv)
+	}
+}
+
+func TestAttachUsesExactReadOnlyTargetWithoutStartingServer(t *testing.T) {
+	client := Client{Executable: "/bin/echo"}
+	for _, tc := range []struct {
+		observe bool
+		want    string
+	}{{false, "-S /private/socket -N attach-session -E -t =ac-job"}, {true, "-S /private/socket -N attach-session -E -r -t =ac-job"}} {
+		cmd := client.AttachCommand("/private/socket", "ac-job", tc.observe)
+		if got := strings.Join(cmd.Args[1:], " "); got != tc.want {
+			t.Fatalf("argv %q; want %q", got, tc.want)
+		}
+	}
+}
+
+func TestInspectRejectsMalformedTmuxFactsAndOldVersions(t *testing.T) {
+	root := t.TempDir()
+	fake := filepath.Join(root, "tmux")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nif [ \"$1\" = -V ]; then printf 'tmux 3.4\\n'; else printf 'not-facts\\n'; fi\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: fake}
+	if err := client.ValidateVersion(context.Background()); err == nil {
+		t.Fatal("accepted tmux older than 3.5")
+	}
+	if _, err := client.Inspect(context.Background(), filepath.Join(root, "missing"), "ac-job"); err == nil {
+		t.Fatal("accepted malformed facts")
+	}
+}
+
+func TestConfigRejectsTmuxConfigInjection(t *testing.T) {
+	if got := Config("owner", "job", "safe; run-shell touch /tmp/pwned"); got != "" {
+		t.Fatalf("accepted unsafe config token: %q", got)
+	}
+	config := Config("owner", "job", "safe-name")
+	for _, required := range []string{"@ac_owner owner", "@ac_job job", "@ac_protocol 1", "assume-paste-time 0", "extended-keys-format csi-u", "remain-on-exit on", "exit-empty on", "window-size latest", "unbind-key -a -T root", "unbind-key -a -T prefix", "bind-key -T root F12 detach-client", "#{?client_readonly,Observe,Enter}", "safe-name", "#{session_attached}"} {
+		if !strings.Contains(config, required) {
+			t.Errorf("config missing %q", required)
+		}
+	}
+}
+
+func execLookPath(name string) (string, error) { return exec.LookPath(name) }
