@@ -1,0 +1,23 @@
+{
+  "name": "agent-coordinator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": ["./pi/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/node": "22.19.19",
+    "typebox": "1.3.27"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test pi/*.test.ts"
+  }
+}
