@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func (c Client) ValidateVersion(ctx context.Context) error {
@@ -94,13 +96,16 @@ func (c Client) Inspect(ctx context.Context, socket, session string) (Snapshot, 
 	return s, nil
 }
 
-func (c Client) AttachCommand(socket, session string, observe bool) *exec.Cmd {
+func (c Client) AttachCommand(ctx context.Context, socket, session string, observe bool) *exec.Cmd {
 	args := []string{"-S", socket, "-N", "attach-session", "-E"}
 	if observe {
 		args = append(args, "-r")
 	}
 	args = append(args, "-t", "="+session)
-	return exec.Command(c.executable(), args...)
+	cmd := exec.CommandContext(ctx, c.executable(), args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = time.Second
+	return cmd
 }
 
 func (c Client) Remove(ctx context.Context, socket, session string) error {

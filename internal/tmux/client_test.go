@@ -104,7 +104,7 @@ func TestAttachUsesExactReadOnlyTargetWithoutStartingServer(t *testing.T) {
 		observe bool
 		want    string
 	}{{false, "-S /private/socket -N attach-session -E -t =ac-job"}, {true, "-S /private/socket -N attach-session -E -r -t =ac-job"}} {
-		cmd := client.AttachCommand("/private/socket", "ac-job", tc.observe)
+		cmd := client.AttachCommand(context.Background(), "/private/socket", "ac-job", tc.observe)
 		if got := strings.Join(cmd.Args[1:], " "); got != tc.want {
 			t.Fatalf("argv %q; want %q", got, tc.want)
 		}
