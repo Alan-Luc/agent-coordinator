@@ -922,6 +922,9 @@ func renderSessionCards(jobs []coordinator.JobFacts, selected, width, height, ca
 			attention += "[AGENT] "
 		}
 		state := "Process " + lifecycle(job)
+		if cardLines == 1 {
+			state = lifecycle(job)
+		}
 		if job.Retired {
 			state = "retired"
 		}
@@ -1009,6 +1012,9 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 	}
 	if job.Session == nil || job.Session.Activity == "unknown" {
 		coverage = "[?] Attention unknown · Enter inspect"
+	}
+	if len(lines)+len(attention)+1 > height {
+		lines = nil
 	}
 	outputRows := 1
 	if visible {

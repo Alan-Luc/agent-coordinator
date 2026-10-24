@@ -129,6 +129,21 @@ func TestObservePrioritizesReadOnlyIdentityAndAttention(t *testing.T) {
 	}
 }
 
+func TestDegradedDashboardKeepsBothAttentionSourcesWithActionStatus(t *testing.T) {
+	attention := "review"
+	m := newModel(t.Context(), nil)
+	m.width, m.height = 30, 12
+	m.jobs = []coordinator.JobFacts{{ID: "id", Name: "worker", Session: &coordinator.SessionStatus{Activity: "idle", Prompt: &coordinator.ObservedPrompt{Kind: "confirm"}, Report: &coordinator.AgentReport{Attention: &attention}}}}
+	m.message = "Attach ended with error; inspect native session before retry."
+	m.previewText = "optional capture"
+	view := ansi.Strip(m.View())
+	for _, required := range []string{"> worker", "[INPUT]", "[AGENT]", "Attach ended with error", "q quit"} {
+		if !strings.Contains(view, required) {
+			t.Errorf("degraded viewport lost priority %q:\n%s", required, view)
+		}
+	}
+}
+
 func TestObserveCompleteCompactRender(t *testing.T) {
 	job := coordinator.JobFacts{ID: "id", Name: "worker", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle"}}
 	const expected = "Observe · READ ONLY · worker · id\nProcess Live · Activity idle\nNo observed input request · other coverage unknown\nLive output · current screen\nhello"
