@@ -683,7 +683,8 @@ func (m model) selectedJobValue() coordinator.JobFacts {
 
 func (m model) View() string {
 	if m.mode == help {
-		return renderHelp(m.width, m.height)
+		m.mode = dashboard
+		return overlayHelp(m.View(), m.width, m.height)
 	}
 	if m.mode == dashboard && m.width >= 72 && m.height >= 16 {
 		return m.renderTableDashboard()
@@ -941,8 +942,6 @@ func (m model) renderFooter(narrow bool) string {
 	}
 	if m.busy {
 		lines = append(lines, "Working…")
-	} else if m.loading && m.message == "" {
-		lines = append(lines, "Refreshing session facts…")
 	}
 	if !m.busy {
 		switch m.mode {

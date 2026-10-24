@@ -405,6 +405,27 @@ func TestPreviewSanitizesControlsAndClipsByTerminalCells(t *testing.T) {
 	}
 }
 
+func TestRefreshDoesNotChangeUnchangedDashboard(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{80, 24}, {120, 30}} {
+		m := newModel(t.Context(), nil)
+		m.width, m.height = size.width, size.height
+		m.jobs = []coordinator.JobFacts{{ID: "job", Name: "worker", Launch: "unknown"}}
+		before := m.View()
+		updated, command := m.Update(refreshTickMsg{})
+		loading := updated.(model)
+		if command == nil || !loading.loading || loading.generation != 1 {
+			t.Fatal("automatic refresh was disabled")
+		}
+		if loading.View() != before {
+			t.Fatal("background refresh changed the dashboard before facts arrived")
+		}
+		updated, _ = loading.Update(resultMsg{operation: loadJobs, generation: 1, jobs: m.jobs})
+		if got := updated.(model); got.loading || got.View() != before {
+			t.Fatal("unchanged refresh changed the dashboard after facts arrived")
+		}
+	}
+}
+
 func TestRefreshFiltersOnlyConfirmedExitedAndKeepsSelectionByUUID(t *testing.T) {
 	m := model{jobs: []coordinator.JobFacts{
 		{ID: "a", Name: "active", Launch: "live"},
