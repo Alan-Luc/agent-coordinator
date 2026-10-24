@@ -7,7 +7,6 @@ import (
 
 	"agent-coordinator/internal/coordinator"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
 )
 
 func TestTaskFormPreservesMultilineBodyAndSubmits(t *testing.T) {
@@ -108,8 +107,8 @@ func TestConfirmationIdentifiesLiteralNameAndUUID(t *testing.T) {
 	m := newModel(context.Background(), nil)
 	m.mode, m.confirm = confirmAction, forgetJob
 	m.jobs = []coordinator.JobFacts{{ID: "cached-uuid\x1b", Name: "worker\x1b"}}
-	view := ansi.Strip(m.View())
-	if !strings.Contains(view, "worker") || !strings.Contains(view, `cached-uuid\x1b`) || strings.Contains(view, "\x1b") {
+	view := terminalStyles.ReplaceAllString(m.View(), "")
+	if !strings.Contains(view, "worker\\x1b") || !strings.Contains(view, `cached-uuid\x1b`) || strings.Contains(view, "\x1b") {
 		t.Fatalf("confirmation does not safely identify exact row:\n%s", view)
 	}
 }
@@ -117,7 +116,7 @@ func TestConfirmationIdentifiesLiteralNameAndUUID(t *testing.T) {
 func TestControlGenerationRendersUntrustedIdentifiersLiterally(t *testing.T) {
 	target := coordinator.SessionTarget{ID: "job", SessionID: "native\x1b", Generation: "runtime\x9b"}
 	m := model{mode: confirmControl, jobs: []coordinator.JobFacts{{ID: "job", Name: "worker"}}, controlTarget: &target, width: 100, height: 30}
-	view := ansi.Strip(m.View())
+	view := terminalStyles.ReplaceAllString(m.View(), "")
 	if strings.ContainsAny(view, "\x1b\x9b") || !strings.Contains(view, `Native session: native\x1b`) || !strings.Contains(view, `Runtime identity: runtime\x9b`) {
 		t.Fatalf("target identity was not rendered literally:\n%s", view)
 	}

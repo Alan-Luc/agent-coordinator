@@ -376,7 +376,7 @@ func TestObserveDistinguishesNativePromptAgentReportAndUnknown(t *testing.T) {
 	}
 	job.Session.Prompt = nil
 	report := renderObserve(job, 80, 12, false, "", "")
-	if plain := ansi.Strip(report); !strings.Contains(plain, "[AGENT] Agent requests:") || !strings.Contains(plain, "needs review\\x1b") || strings.ContainsAny(plain, "\x1b\a\x00") {
+	if plain := terminalStyles.ReplaceAllString(report, ""); !strings.Contains(plain, "[AGENT] Agent requests:") || !strings.Contains(plain, "needs review\\x1b") || strings.ContainsAny(plain, "\x1b\a\x00") {
 		t.Fatalf("agent report was conflated or not sanitized:\\n%s", report)
 	}
 	job.Session = nil

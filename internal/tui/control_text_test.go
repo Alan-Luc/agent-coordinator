@@ -4,14 +4,16 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"agent-coordinator/internal/coordinator"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 )
+
+var terminalStyles = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func TestTaskFormRendersControlsLiterallyWithoutChangingTask(t *testing.T) {
 	const text = "世界\x1b]52;c;cGF5bG9hZA==\a\nsecond line"
@@ -25,13 +27,25 @@ func TestTaskFormRendersControlsLiterallyWithoutChangingTask(t *testing.T) {
 	if current.name != text || current.cwd != text || current.task != text {
 		t.Fatal("terminal-control rendering changed the supplied input")
 	}
-	view := ansi.Strip(current.View())
+	view := terminalStyles.ReplaceAllString(current.View(), "")
 	if strings.ContainsAny(view, "\x1b\a") {
 		t.Fatal("form emits executable terminal controls from input")
 	}
 	for _, visible := range []string{"世界", "\\x1b", "\\a", "\nsecond line"} {
 		if !strings.Contains(view, visible) {
 			t.Errorf("form did not display literal input %q", visible)
+		}
+	}
+}
+
+func TestTaskFormEscapesColorInputInEachField(t *testing.T) {
+	for _, field := range []int{0, 1, 2} {
+		current := newModel(context.Background(), nil)
+		current.mode, current.field = newTask, field
+		updated, _ := current.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("literal\x1b[31mred\x1b[0m"), Paste: true})
+		view := terminalStyles.ReplaceAllString(updated.(model).View(), "")
+		if !strings.Contains(view, "literal\\x1b[31mred\\x1b[0m") || strings.Contains(view, "\x1b") {
+			t.Errorf("field %d treated input color as application styling: %q", field, view)
 		}
 	}
 }
