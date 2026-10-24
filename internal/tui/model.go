@@ -274,7 +274,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "Selected session changed; pending control cancelled."
 			}
 		} else if message.operation == inspectJob {
-			m.message = fmt.Sprintf("%s · %s: launch=%s terminal=%s readiness=%s outcome=%s; %s", message.job.ID, message.job.Name, message.job.Launch, message.job.Terminal, message.job.PiReadiness, message.job.TaskOutcome, message.job.NextAction)
+			m.message = fmt.Sprintf("outcome=%s; %s · %s · %s: launch=%s terminal=%s readiness=%s", message.job.TaskOutcome, message.job.NextAction, message.job.Name, message.job.ID, message.job.Launch, message.job.Terminal, message.job.PiReadiness)
 			return m.beginRefresh()
 		} else {
 			if message.operation == startJob {
@@ -571,14 +571,6 @@ func (m model) updateForm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) selectedLabel() string {
-	job, ok := m.selectedJob()
-	if !ok {
-		return "no job selected"
-	}
-	return renderLiteralLine(job.Name) + " (" + renderLiteralLine(job.ID) + ")"
-}
-
 func (m model) selectedJob() (coordinator.JobFacts, bool) {
 	if m.selected < 0 || m.selected >= len(m.jobs) {
 		return coordinator.JobFacts{}, false
@@ -693,7 +685,9 @@ func (m model) View() string {
 		view.WriteString("Agent coordinator\n")
 	} else {
 		view.WriteString(lipgloss.NewStyle().Bold(true).Render("Agent coordinator") + "\n")
-		fmt.Fprintf(&view, "%d sessions · %d with known attention · %d observation unknown\n", len(m.jobs), attentionCount, unknownCount)
+		if m.mode == dashboard {
+			fmt.Fprintf(&view, "%d sessions · %d with known attention · %d observation unknown\n", len(m.jobs), attentionCount, unknownCount)
+		}
 	}
 	footer := m.renderFooter(narrow, attentionCount)
 	footerHeight := 0
@@ -702,32 +696,8 @@ func (m model) View() string {
 		footerHeight = len(strings.Split(footer, "\n"))
 	}
 	bodyHeight := max(m.height-footerHeight, 0)
-	if m.mode == newTask {
-		view.WriteString("New task (Tab changes field; Enter advances/submits; Ctrl+J adds a task line; Esc cancels)\n")
-		fields := []struct{ label, text string }{
-			{"Name", renderLiteralLine(m.name)},
-			{"Working directory", renderLiteralLine(m.cwd)},
-			{"Task", renderLiteralText(m.task)},
-		}
-		for index, field := range fields {
-			marker := " "
-			if index == m.field {
-				marker = ">"
-			}
-			fmt.Fprintf(&view, "%s %s: %s\n", marker, field.label, field.text)
-		}
-		view.WriteString("\nEnter submits to a persistent Pi session. Shared cwd may cause conflicting edits.\n")
-	} else if m.mode == confirmAction {
-		fmt.Fprintf(&view, "Confirm %s for %s? [y/N]\n", operationName(m.confirm), m.selectedLabel())
-		view.WriteString("This is an explicit lifecycle action; it does not establish task success.\n")
-	} else if m.mode == composeMessage {
-		fmt.Fprintf(&view, "Direction to %s · %s · Enter sends literally; Ctrl+J adds a line; Esc cancels\n\n%s", m.selectedLabel(), m.targetGeneration(), renderLiteralText(m.controlText))
-	} else if m.mode == confirmControl {
-		if m.controlForce {
-			fmt.Fprintf(&view, "Force-stop %s · %s? [y/N]\nSIGKILL may interrupt writes; detached children may survive.\n", m.selectedLabel(), m.targetGeneration())
-		} else {
-			fmt.Fprintf(&view, "Request graceful stop for %s · %s? [y/N]\nThe session may defer shutdown; no automatic escalation.\n", m.selectedLabel(), m.targetGeneration())
-		}
+	if m.mode != dashboard {
+		view.WriteString(m.renderModal(max(bodyHeight-1, 1)))
 	} else {
 		if m.width >= 96 && m.height >= 24 {
 			leftWidth := min(max(m.width*38/100, 32), 48)
@@ -771,15 +741,97 @@ func (m model) View() string {
 	return body + "\n" + footer
 }
 
+func (m model) renderModal(height int) string {
+	width := max(m.width, 1)
+	heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	if m.mode == newTask {
+		lines := []string{heading.Render("New task")}
+		fields := []struct{ label, text string }{
+			{"Name", renderLiteralLine(m.name)},
+			{"Working directory", renderLiteralLine(m.cwd)},
+			{"Task", renderLiteralText(m.task)},
+		}
+		for index, field := range fields {
+			marker := "  "
+			if index == m.field {
+				marker = "> "
+			}
+			prefix := marker + field.label + ": "
+			rows := 1
+			if index == 2 {
+				rows = min(4, max(height-3, 1))
+			}
+			lines = append(lines, prefix+draftExcerpt(field.text, max(width-ansi.StringWidth(prefix), 1), rows))
+		}
+		if lipgloss.Height(strings.Join(lines, "\n")) < height {
+			lines = append(lines, "Persistent Pi session · Shared cwd may cause conflicting edits.")
+		}
+		return clipView(strings.Join(lines, "\n"), width, height)
+	}
+	job := m.selectedJobValue()
+	id, native, runtime := job.ID, "", ""
+	if job.Session != nil {
+		native, runtime = job.Session.SessionID, job.Session.Generation
+	}
+	if m.mode == confirmAction && m.confirmJobID != "" {
+		id, native, runtime = m.confirmJobID, m.confirmSession, m.confirmGen
+	} else if m.controlTarget != nil {
+		id, native, runtime = m.controlTarget.ID, m.controlTarget.SessionID, m.controlTarget.Generation
+	}
+	identity := "Name: " + renderLiteralLine(job.Name) + "\nUUID: " + renderLiteralLine(id)
+	identity += "\nNative session: " + renderLiteralLine(native) + "\nRuntime identity: " + renderLiteralLine(runtime)
+	if m.mode == composeMessage {
+		lines := heading.Render("Direction · send literally") + "\n" + identity + "\n> Direction:"
+		lines = ansi.Wrap(lines, width, " ")
+		if lipgloss.Height(lines)+1 > height {
+			lines = heading.Render("Direction · send literally") + "\nResize to inspect full target.\n> Direction:"
+		}
+		rows := max(height-lipgloss.Height(lines), 1)
+		return clipView(lines+"\n"+draftExcerpt(renderLiteralText(m.controlText), width, rows), width, height)
+	}
+	title, consequence := "Confirm "+operationName(m.confirm), "Explicit lifecycle action; does not establish task success."
+	if m.mode == confirmControl {
+		title, consequence = "Request graceful stop", "The session may defer shutdown; no automatic escalation."
+		if m.controlForce {
+			title = "Force-stop"
+			consequence = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("SIGKILL may interrupt writes; detached children may survive.")
+		}
+	}
+	content := heading.Render(title) + "\n" + identity + "\n" + consequence
+	if lipgloss.Height(ansi.Wrap(content, width, " ")) > height {
+		content = heading.Render(title) + "\nResize to inspect full target before confirming.\n" + consequence
+	}
+	return clipView(content, width, height)
+}
+
+func draftExcerpt(escaped string, width, height int) string {
+	lines := strings.Split(ansi.Wrap(escaped, width, " "), "\n")
+	if len(lines) > height {
+		lines = lines[len(lines)-height:]
+		lines[0] = "…" + ansi.Truncate(lines[0], max(width-1, 1), "")
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m model) renderFooter(narrow bool, attentionCount int) string {
 	var lines []string
 	if m.message != "" {
-		lines = append(lines, clipView(renderLiteralText(m.message), m.width, 3))
+		lines = append(lines, "Action status", clipView(renderLiteralText(m.message), m.width, 2))
 	}
 	if m.busy {
 		lines = append(lines, "Working…")
 	} else if m.loading && m.message == "" {
 		lines = append(lines, "Refreshing session facts…")
+	}
+	if !m.busy {
+		switch m.mode {
+		case newTask:
+			lines = append(lines, "Tab field · Enter next/submit · Ctrl+J newline · Esc cancel")
+		case composeMessage:
+			lines = append(lines, "Enter send literally · Ctrl+J newline · Esc cancel")
+		case confirmAction, confirmControl:
+			lines = append(lines, "[y/N] · y confirm · any other key cancel")
+		}
 	}
 	if m.mode == dashboard && !m.busy {
 		if narrow {
@@ -811,13 +863,6 @@ func clipView(view string, width, height int) string {
 		lines = lines[:height]
 	}
 	return strings.Join(lines, "\n")
-}
-
-func (m model) targetGeneration() string {
-	if m.controlTarget == nil {
-		return ""
-	}
-	return renderLiteralLine(m.controlTarget.SessionID) + " · " + renderLiteralLine(m.controlTarget.Generation)
 }
 
 func lifecycle(job coordinator.JobFacts) string {
@@ -881,10 +926,11 @@ func renderSessionCards(jobs []coordinator.JobFacts, selected, width, height, ca
 			state = "retired"
 		}
 		name = ansi.Truncate(name, max(width-ansi.StringWidth(state)-4, 1), "…")
-		label := marker + name + strings.Repeat(" ", max(width-ansi.StringWidth(marker+name+state), 1)) + state
+		nameStyle := lipgloss.NewStyle().Bold(true)
 		if index == selected {
-			label = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true).Render(label)
+			nameStyle = nameStyle.Foreground(lipgloss.Color("6"))
 		}
+		label := marker + nameStyle.Render(name) + strings.Repeat(" ", max(width-ansi.StringWidth(marker+name+state), 1)) + state
 		lines = append(lines, label)
 		if cardLines >= 2 {
 			facts := strings.TrimSpace(attention)

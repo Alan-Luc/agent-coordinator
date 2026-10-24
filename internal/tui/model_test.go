@@ -117,7 +117,7 @@ func TestControlGenerationRendersUntrustedIdentifiersLiterally(t *testing.T) {
 	target := coordinator.SessionTarget{ID: "job", SessionID: "native\x1b", Generation: "runtime\x9b"}
 	m := model{mode: confirmControl, jobs: []coordinator.JobFacts{{ID: "job", Name: "worker"}}, controlTarget: &target, width: 100, height: 30}
 	view := m.View()
-	if strings.ContainsAny(view, "\x1b\x9b") || !strings.Contains(view, `native\x1b · runtime\x9b`) {
+	if strings.ContainsAny(view, "\x1b\x9b") || !strings.Contains(view, `Native session: native\x1b`) || !strings.Contains(view, `Runtime identity: runtime\x9b`) {
 		t.Fatalf("target identity was not rendered literally:\n%s", view)
 	}
 }

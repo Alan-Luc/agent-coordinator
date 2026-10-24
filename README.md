@@ -22,10 +22,17 @@ digits, `_`, `.`, `/`, and `-`, to avoid tmux command-parser ambiguity.
 
 ## Dashboard
 
-The session list stays visible beside a live, read-only **Observe** pane. **Enter**
-opens that same native Pi session; **F12 Return** detaches only your client.
-Observe captures the current screen without forwarding input or resizing Pi.
-Use **o** to toggle it in a narrow terminal.
+Compact session cards keep names, process state, activity and attention distinct.
+At 96×24 and above, the list sits beside a larger **Observe · READ ONLY** pane;
+smaller terminals stack them. Below 72×12, resize for full identity and recovery
+text. Selection uses `>` even without color; `[INPUT]` marks an observed native
+prompt, `[AGENT]` an explicit agent request, and `[?]` unknown observation.
+
+**Enter** opens that same native Pi session; **F12 Return** detaches only your
+client. Observe captures the current screen, not scrollback, without forwarding
+input or resizing Pi. **o** hides only the output; selected facts and attention
+remain visible. Forms show the active field and retain literal multiline drafts;
+confirmations label the full target identity and never default to yes.
 
 The dashboard refreshes automatically. Confirmed exited sessions disappear from
 its active list, but their diagnostic records remain in `list`/`doctor`. Unknown
