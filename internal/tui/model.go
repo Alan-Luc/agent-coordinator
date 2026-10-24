@@ -689,7 +689,7 @@ func (m model) View() string {
 			fmt.Fprintf(&view, "%d sessions · %d with known attention · %d observation unknown\n", len(m.jobs), attentionCount, unknownCount)
 		}
 	}
-	footer := m.renderFooter(narrow, attentionCount)
+	footer := m.renderFooter(narrow)
 	footerHeight := 0
 	if footer != "" {
 		footer = clipView(footer, m.width, max(m.height-1, 1))
@@ -708,7 +708,7 @@ func (m model) View() string {
 			view.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
 		} else if narrow {
 			available := max(bodyHeight-2, 0)
-			previewHeight := min(4, max(available-2, 0))
+			previewHeight := min(4, max(available-1, 0))
 			listHeight := available - previewHeight
 			if listHeight > 0 {
 				view.WriteString(renderSessionCards(m.jobs, m.selected, m.width, listHeight, 1) + "\n")
@@ -724,11 +724,7 @@ func (m model) View() string {
 				listHeight = min(9, max(available-5, 1))
 			}
 			view.WriteString(renderSessionCards(m.jobs, m.selected, m.width, listHeight, 2) + "\n")
-			if m.observe {
-				view.WriteString(renderObserve(m.selectedJobValue(), m.width, available-listHeight, true, m.previewText, m.previewError))
-			} else {
-				view.WriteString(renderObserve(m.selectedJobValue(), m.width, available-listHeight, false, "", ""))
-			}
+			view.WriteString(renderObserve(m.selectedJobValue(), m.width, available-listHeight, m.observe, m.previewText, m.previewError))
 		}
 	}
 	if bodyHeight == 0 {
@@ -808,15 +804,19 @@ func draftExcerpt(escaped string, width, height int) string {
 	lines := strings.Split(ansi.Wrap(escaped, width, " "), "\n")
 	if len(lines) > height {
 		lines = lines[len(lines)-height:]
-		lines[0] = "…" + ansi.Truncate(lines[0], max(width-1, 1), "")
+		for ansi.StringWidth(lines[0]) >= width {
+			_, _, size, _ := ansi.DecodeSequence(lines[0], ansi.NormalState, nil)
+			lines[0] = lines[0][size:]
+		}
+		lines[0] = "…" + lines[0]
 	}
 	return strings.Join(lines, "\n")
 }
 
-func (m model) renderFooter(narrow bool, attentionCount int) string {
+func (m model) renderFooter(narrow bool) string {
 	var lines []string
 	if m.message != "" {
-		lines = append(lines, "Action status", clipView(renderLiteralText(m.message), m.width, 2))
+		lines = append(lines, "Action status", clipView(renderLiteralText(m.message), m.width, 3))
 	}
 	if m.busy {
 		lines = append(lines, "Working…")
@@ -921,12 +921,18 @@ func renderSessionCards(jobs []coordinator.JobFacts, selected, width, height, ca
 		if job.Session != nil && job.Session.Report != nil && job.Session.Report.Attention != nil && *job.Session.Report.Attention != "" {
 			attention += "[AGENT] "
 		}
-		state := "Process " + lifecycle(job)
-		if cardLines == 1 {
-			state = lifecycle(job)
-		}
+		process := lifecycle(job)
+		state := "Process " + process
 		if job.Retired {
-			state = "retired"
+			process, state = "retired", "retired"
+		}
+		if cardLines == 1 {
+			state = strings.TrimSpace(attention)
+			if state == "" {
+				state = process
+			} else if width >= 2+min(ansi.StringWidth(name), 8)+1+ansi.StringWidth(state)+1+ansi.StringWidth(process) {
+				state += " " + process
+			}
 		}
 		name = ansi.Truncate(name, max(width-ansi.StringWidth(state)-4, 1), "…")
 		nameStyle := lipgloss.NewStyle().Bold(true)
@@ -986,7 +992,7 @@ func sessionAttention(job coordinator.JobFacts) bool {
 
 func renderObserve(job coordinator.JobFacts, width, height int, visible bool, preview, previewError string) string {
 	width, height = max(width, 1), max(height, 1)
-	title := "Observe · READ ONLY"
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true).Render("Observe · READ ONLY")
 	if job.ID == "" && job.Name == "" {
 		return clipView(title+"\nSelect a session · n new", width, height)
 	}
@@ -1001,12 +1007,16 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 	if job.Session != nil {
 		session := job.Session
 		if session.Prompt != nil {
-			attention = append(attention, "[INPUT] Needs your input · native "+renderLiteralLine(session.Prompt.Kind)+" · "+renderLiteralLine(session.Prompt.Title))
+			label := "[INPUT] Needs your input · native " + renderLiteralLine(session.Prompt.Kind)
+			if session.Prompt.Title != "" {
+				label += " · " + renderLiteralLine(session.Prompt.Title)
+			}
+			attention = append(attention, label)
 		}
 		if session.Report != nil && session.Report.Attention != nil && *session.Report.Attention != "" {
 			attention = append(attention, "[AGENT] Agent requests: "+renderLiteralLine(*session.Report.Attention))
 		}
-		if session.Prompt == nil && !sessionAttention(job) {
+		if !sessionAttention(job) {
 			coverage = "No observed input request · other coverage unknown"
 		}
 	}
@@ -1023,13 +1033,21 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 	if len(lines)+len(attention)+1+outputRows < height {
 		lines = append(lines, "Process "+lifecycle(job)+" · Activity "+activity(job))
 	}
+	for index, line := range attention {
+		suffix := " Enter inspect"
+		if ansi.StringWidth(line) > width && width >= 24 {
+			line = ansi.Truncate(line, width-ansi.StringWidth(suffix), "…") + suffix
+		}
+		attention[index] = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(line)
+	}
 	lines = append(lines, attention...)
 	lines = append(lines, coverage)
 	if job.Session != nil && job.Session.Report != nil && job.Session.Report.Summary != "" && len(lines)+outputRows < height {
 		lines = append(lines, "Agent report: "+firstReportLine(job.Session.Report.Summary))
 	}
 	if visible {
-		if len(lines)+2 <= height {
+		labelled := len(lines)+2 <= height
+		if labelled {
 			lines = append(lines, "Live output · current screen")
 		}
 		if len(lines) < height {
@@ -1040,7 +1058,7 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 				lines = append(lines, "Waiting for first capture…")
 			default:
 				output := strings.Split(renderPreview(preview, width), "\n")
-				if height <= 4 {
+				if !labelled {
 					output[0] = "Output · " + output[0]
 				}
 				lines = append(lines, output...)
@@ -1052,17 +1070,8 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 	if len(lines) > height {
 		lines = lines[:height]
 	}
-	for index, line := range lines {
-		if (strings.HasPrefix(line, "[INPUT]") || strings.HasPrefix(line, "[AGENT]")) && ansi.StringWidth(line) > width && width >= 24 {
-			line = ansi.Truncate(line, width-14, "…") + " Enter inspect"
-		}
-		line = ansi.Truncate(line, width, "…")
-		if index == 0 {
-			line = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true).Render(line)
-		} else if strings.HasPrefix(line, "[INPUT]") || strings.HasPrefix(line, "[AGENT]") {
-			line = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(line)
-		}
-		lines[index] = line
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], width, "…")
 	}
 	return strings.Join(lines, "\n")
 }

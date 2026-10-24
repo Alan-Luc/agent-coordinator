@@ -144,6 +144,54 @@ func TestDegradedDashboardKeepsBothAttentionSourcesWithActionStatus(t *testing.T
 	}
 }
 
+func TestCaptureTextCannotAcquireAttentionPresentation(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.ANSI)
+	job := coordinator.JobFacts{ID: "id", Name: "worker", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle"}}
+	for _, marker := range []string{"[INPUT]", "[AGENT]"} {
+		view := renderObserve(job, 48, 12, true, marker+" captured words "+strings.Repeat("output ", 20), "")
+		if strings.Contains(view, "\x1b[33m") || strings.Contains(view, "Enter inspect") {
+			t.Errorf("capture was presented as an observed request:\n%q", view)
+		}
+	}
+	attention := "review"
+	job.Session.Prompt = &coordinator.ObservedPrompt{Kind: "confirm"}
+	job.Session.Report = &coordinator.AgentReport{Attention: &attention}
+	view := ansi.Strip(renderObserve(job, 72, 5, true, "[INPUT] captured text, not a native request", ""))
+	lines := strings.Split(view, "\n")
+	if !strings.HasPrefix(lines[len(lines)-1], "Output · ") {
+		t.Errorf("one-row capture has no source label:\n%s", view)
+	}
+	short := renderObserve(job, 72, 2, true, "optional output", "")
+	if strings.Count(short, "\x1b[33m") != 2 || strings.Contains(short, "\x1b[1;36m") {
+		t.Errorf("title-free warnings lost attention style: %q", short)
+	}
+}
+
+func TestSingleLineCardsKeepUnselectedAttentionDiscoverable(t *testing.T) {
+	attention := "review"
+	jobs := []coordinator.JobFacts{
+		{ID: "a", Name: "worker", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle"}},
+		{ID: "b", Name: "reviewer", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle", Prompt: &coordinator.ObservedPrompt{Kind: "confirm"}, Report: &coordinator.AgentReport{Attention: &attention}}},
+	}
+	view := ansi.Strip(renderSessionCards(jobs, 0, 30, 3, 1))
+	if !strings.Contains(view, "reviewer") || !strings.Contains(view, "[INPUT] [AGENT]") {
+		t.Fatalf("unselected request disappeared from degraded list:\n%s", view)
+	}
+}
+
+func TestNarrowActionStatusKeepsNoRetryAdvice(t *testing.T) {
+	for _, message := range []string{"job publication uncertain; inspect list/doctor, do not retry", "launch uncertain; inspect list/doctor before any new attempt"} {
+		m := newModel(t.Context(), nil)
+		m.width, m.height, m.message = 30, 12, message
+		text := strings.Join(strings.Fields(ansi.Strip(m.View())), " ")
+		if !strings.Contains(text, message) || !strings.Contains(text, "q quit") {
+			t.Errorf("recovery advice was lost:\n%s", m.View())
+		}
+	}
+}
+
 func TestObserveCompleteCompactRender(t *testing.T) {
 	job := coordinator.JobFacts{ID: "id", Name: "worker", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle"}}
 	const expected = "Observe · READ ONLY · worker · id\nProcess Live · Activity idle\nNo observed input request · other coverage unknown\nLive output · current screen\nhello"
@@ -328,7 +376,7 @@ func TestObserveDistinguishesNativePromptAgentReportAndUnknown(t *testing.T) {
 	}
 	job.Session.Prompt = nil
 	report := renderObserve(job, 80, 12, false, "", "")
-	if !strings.Contains(report, "[AGENT] Agent requests:") || strings.ContainsAny(report, "\x1b\a\x00") {
+	if plain := ansi.Strip(report); !strings.Contains(plain, "[AGENT] Agent requests:") || !strings.Contains(plain, "needs review\\x1b") || strings.ContainsAny(plain, "\x1b\a\x00") {
 		t.Fatalf("agent report was conflated or not sanitized:\\n%s", report)
 	}
 	job.Session = nil
@@ -470,7 +518,7 @@ func TestNarrowDashboardKeepsPreviewVisible(t *testing.T) {
 	m.width, m.height, m.observe = 30, 12, true
 	m.jobs = []coordinator.JobFacts{{ID: "id", Name: "worker"}}
 	m.previewText = "ok"
-	if view := m.View(); !strings.Contains(view, "Output · ok") {
+	if view := m.View(); !strings.Contains(view, "Live output · current screen") || !strings.Contains(view, "\nok\n") {
 		t.Fatalf("narrow layout clipped the visible preview:\n%s", view)
 	}
 }

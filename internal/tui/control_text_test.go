@@ -10,6 +10,7 @@ import (
 	"agent-coordinator/internal/coordinator"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestTaskFormRendersControlsLiterallyWithoutChangingTask(t *testing.T) {
@@ -24,7 +25,7 @@ func TestTaskFormRendersControlsLiterallyWithoutChangingTask(t *testing.T) {
 	if current.name != text || current.cwd != text || current.task != text {
 		t.Fatal("terminal-control rendering changed the supplied input")
 	}
-	view := current.View()
+	view := ansi.Strip(current.View())
 	if strings.ContainsAny(view, "\x1b\a") {
 		t.Fatal("form emits executable terminal controls from input")
 	}
@@ -161,7 +162,11 @@ func TestConfirmationRetainsIdentityConsequenceAndChoiceAtSupportedSizes(t *test
 				current.jobs = []coordinator.JobFacts{job}
 				current.confirm = continueJob
 				current.controlForce = true
-				current.controlTarget = &coordinator.SessionTarget{ID: uuid, SessionID: nativeID, Generation: runtimeID}
+				if confirmation.mode == confirmAction {
+					current.setConfirmation(continueJob)
+				} else {
+					current.controlTarget = &coordinator.SessionTarget{ID: uuid, SessionID: nativeID, Generation: runtimeID}
+				}
 				view := current.View()
 				visible := strings.Join(strings.Fields(view), "")
 				for _, expected := range confirmation.want {
@@ -175,6 +180,36 @@ func TestConfirmationRetainsIdentityConsequenceAndChoiceAtSupportedSizes(t *test
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestDraftExcerptKeepsContiguousTail(t *testing.T) {
+	for _, test := range []struct{ text, want string }{
+		{"abcdefghijklmno", "…ghij\nklmno"},
+		{"abcde界abc12345", "…abc\n12345"},
+	} {
+		got := draftExcerpt(test.text, 5, 2)
+		if got != test.want || lipgloss.Width(got) > 5 {
+			t.Errorf("excerpt lost its contiguous bounded tail: %q, want %q", got, test.want)
+		}
+	}
+}
+
+func TestConfirmationRendersCapturedLifecycleIdentity(t *testing.T) {
+	for _, op := range []operation{continueJob, repairJob, forgetJob} {
+		m := newModel(t.Context(), nil)
+		m.jobs = []coordinator.JobFacts{{ID: "confirmed-uuid", Name: "worker", Session: &coordinator.SessionStatus{SessionID: "confirmed-native", Generation: "confirmed-runtime"}}}
+		m.setConfirmation(op)
+		m.jobs[0].Session = &coordinator.SessionStatus{SessionID: "changed-native", Generation: "changed-runtime"}
+		view := m.View()
+		for _, required := range []string{"UUID: confirmed-uuid", "Native session: confirmed-native", "Runtime identity: confirmed-runtime"} {
+			if !strings.Contains(view, required) {
+				t.Errorf("%v confirmation lost captured target %q:\n%s", op, required, view)
+			}
+		}
+		if strings.Contains(view, "changed-native") || strings.Contains(view, "changed-runtime") {
+			t.Errorf("%v confirmation displayed a replacement snapshot:\n%s", op, view)
 		}
 	}
 }
