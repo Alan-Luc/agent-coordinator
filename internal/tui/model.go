@@ -680,16 +680,20 @@ func (m model) selectedJobValue() coordinator.JobFacts {
 func (m model) View() string {
 	var view strings.Builder
 	narrow := m.width < 72 || m.height < 12
-	if narrow {
-		view.WriteString("Agent coordinator\n")
-	} else {
-		view.WriteString("Agent coordinator — Pi readiness and task outcome are never inferred\n\n")
-	}
-	attentionCount := 0
+	attentionCount, unknownCount := 0, 0
 	for _, job := range m.jobs {
 		if sessionAttention(job) {
 			attentionCount++
 		}
+		if job.Session == nil || job.Session.Activity == "unknown" {
+			unknownCount++
+		}
+	}
+	if narrow {
+		view.WriteString("Agent coordinator\n")
+	} else {
+		view.WriteString(lipgloss.NewStyle().Bold(true).Render("Agent coordinator") + "\n")
+		fmt.Fprintf(&view, "%d sessions · %d with known attention · %d observation unknown\n", len(m.jobs), attentionCount, unknownCount)
 	}
 	footer := m.renderFooter(narrow, attentionCount)
 	footerHeight := 0
@@ -725,33 +729,39 @@ func (m model) View() string {
 			fmt.Fprintf(&view, "Request graceful stop for %s · %s? [y/N]\nThe session may defer shutdown; no automatic escalation.\n", m.selectedLabel(), m.targetGeneration())
 		}
 	} else {
-		if narrow {
-			available := max(bodyHeight-2, 0)
+		if m.width >= 96 && m.height >= 24 {
+			leftWidth := min(max(m.width*38/100, 32), 48)
+			rightWidth := m.width - leftWidth - 1
+			panelHeight := max(bodyHeight-4, 1)
+			leftPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6")).Padding(0, 1).Width(leftWidth - 2).Height(panelHeight).Render(renderSessionList(m.jobs, m.selected, leftWidth-4, panelHeight))
+			rightPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.AdaptiveColor{Light: "8", Dark: "7"}).Padding(0, 1).Width(rightWidth - 2).Height(panelHeight).Render(renderObserve(m.selectedJobValue(), rightWidth-4, panelHeight, m.observe, m.previewText, m.previewError))
+			view.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
+		} else if narrow {
+			available := max(bodyHeight-1, 0)
 			previewHeight := 0
 			if m.observe {
 				previewHeight = min(4, max(available-2, 0))
 			}
 			listHeight := available - previewHeight
 			if listHeight > 0 {
-				view.WriteString(renderSessionList(m.jobs, m.selected, m.width-2, listHeight) + "\n")
+				view.WriteString(renderSessionCards(m.jobs, m.selected, m.width, listHeight, 1) + "\n")
 			}
 			fmt.Fprintf(&view, "Min 72×12 · Attention %d\n", attentionCount)
 			if m.observe && previewHeight > 0 {
 				view.WriteString(renderNarrowObserve(m.selectedJobValue(), m.width-2, previewHeight, m.previewText, m.previewError) + "\n")
 			}
 		} else {
-			leftWidth := m.width * 42 / 100
-			if leftWidth < 30 {
-				leftWidth = 30
+			available := max(bodyHeight-2, 0)
+			listHeight := min(7, max(available-8, 1))
+			if !m.observe {
+				listHeight = min(9, max(available-5, 1))
 			}
-			rightWidth := m.width - leftWidth - 3
-			if rightWidth < 30 {
-				rightWidth = 30
+			view.WriteString(renderSessionCards(m.jobs, m.selected, m.width, listHeight, 2) + "\n")
+			if m.observe {
+				view.WriteString(renderNarrowObserve(m.selectedJobValue(), m.width, available-listHeight, m.previewText, m.previewError))
+			} else {
+				view.WriteString(renderObserve(m.selectedJobValue(), m.width, available-listHeight, false, "", ""))
 			}
-			panelHeight := max(bodyHeight-4, 1)
-			leftPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Width(leftWidth - 2).Height(panelHeight).Render(renderSessionList(m.jobs, m.selected, leftWidth-4, panelHeight-2))
-			rightPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Width(rightWidth - 2).Height(panelHeight).Render(renderObserve(m.selectedJobValue(), rightWidth-4, panelHeight-2, m.observe, m.previewText, m.previewError))
-			view.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel))
 		}
 	}
 	if bodyHeight == 0 {
@@ -774,11 +784,14 @@ func (m model) renderFooter(narrow bool, attentionCount int) string {
 	} else if m.loading && m.message == "" {
 		lines = append(lines, "Refreshing session facts…")
 	}
-	if m.mode == dashboard {
+	if m.mode == dashboard && !m.busy {
 		if narrow {
 			lines = append(lines, "↑↓/o/Enter · n new · m send", "s stop · X force · d info", "c/r/f · l refresh · q quit")
 		} else {
-			lines = append(lines, "↑/↓ select · n new · Enter open native session · o Observe", "m steer · s stop · X force-stop · d details · c Continue", "r repair · f Forget · l refresh · q quit", fmt.Sprintf("Attention: %d · %d clients share input · Shared cwd · F12 Return", attentionCount, m.selectedJobValue().Clients))
+			lines = append(lines, "↑↓ select · Enter open · o Observe · n new · m steer", "s stop · X force-stop · d details · c Continue · r repair · f Forget", fmt.Sprintf("l refresh · q quit · %d clients share input · Shared cwd · F12 Return", m.selectedJobValue().Clients))
+			if m.height >= 24 {
+				lines = append(lines, "Pi readiness and task outcome are never inferred")
+			}
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -820,53 +833,105 @@ func lifecycle(job coordinator.JobFacts) string {
 	if job.Terminal == "live" {
 		return "Live"
 	}
+	if job.Launch == "" {
+		return "Status unknown"
+	}
 	return renderLiteralLine(strings.ReplaceAll(job.Launch, "-", " "))
 }
 
 func renderSessionList(jobs []coordinator.JobFacts, selected, width, height int) string {
-	if width < 1 {
-		width = 1
-	}
-	if height < 1 {
-		height = 1
-	}
-	lines := []string{"Sessions"}
-	if len(jobs) == 0 {
-		lines = append(lines, "No sessions yet · press n to start")
-	}
+	return renderSessionCards(jobs, selected, width, height, 3)
+}
+
+func renderSessionCards(jobs []coordinator.JobFacts, selected, width, height, cardLines int) string {
+	width, height = max(width, 1), max(height, 1)
+	cardLines = min(cardLines, max(height-1, 1))
+	cards := max((height-1)/cardLines, 1)
 	start := 0
-	capacity := height - 1
-	if capacity < 1 {
-		capacity = 1
+	if selected >= cards {
+		start = selected - cards + 1
 	}
-	if selected >= capacity {
-		start = selected - capacity + 1
+	if start > len(jobs)-cards {
+		start = max(len(jobs)-cards, 0)
 	}
-	if start > len(jobs)-capacity {
-		start = max(len(jobs)-capacity, 0)
+	end := min(start+cards, len(jobs))
+	lines := []string{fmt.Sprintf("Sessions · Showing %d–%d of %d", min(start+1, len(jobs)), end, len(jobs))}
+	if len(jobs) == 0 {
+		return ansi.Truncate("No active rows · n new · l refresh", width, "…")
 	}
-	for index := start; index < len(jobs); index++ {
+	if height == 1 {
+		lines = nil
+	}
+	for index := start; index < end; index++ {
 		job := jobs[index]
 		marker := "  "
 		if index == selected {
-			marker = "› "
+			marker = "> "
 		}
-		label := marker + renderLiteralLine(job.Name) + "  " + lifecycle(job)
+		name := renderLiteralLine(job.Name)
+		attention := ""
+		if job.Session == nil || job.Session.Activity == "unknown" {
+			attention += "[?] "
+		}
+		if job.Session != nil && job.Session.Prompt != nil {
+			attention += "[INPUT] "
+		}
+		if job.Session != nil && job.Session.Report != nil && job.Session.Report.Attention != nil && *job.Session.Report.Attention != "" {
+			attention += "[AGENT] "
+		}
+		state := "Process " + lifecycle(job)
 		if job.Retired {
-			label += " · retired"
+			state = "retired"
 		}
-		lines = append(lines, runewidth.Truncate(label, width, "…"))
-		if sessionAttention(job) {
-			lines[len(lines)-1] = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render(lines[len(lines)-1])
-		}
+		name = ansi.Truncate(name, max(width-ansi.StringWidth(state)-4, 1), "…")
+		label := marker + name + strings.Repeat(" ", max(width-ansi.StringWidth(marker+name+state), 1)) + state
 		if index == selected {
-			lines[len(lines)-1] = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true).Render(lines[len(lines)-1])
+			label = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true).Render(label)
 		}
-		if len(lines) >= height {
-			break
+		lines = append(lines, label)
+		if cardLines >= 2 {
+			facts := strings.TrimSpace(attention)
+			if facts != "" {
+				facts += " · "
+			}
+			facts += "Activity " + activity(job)
+			if attention == "" {
+				facts += " · other coverage unknown"
+			}
+			facts = "  " + facts
+			if sessionAttention(job) {
+				facts = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(facts)
+			}
+			lines = append(lines, facts)
+		}
+		if cardLines == 3 {
+			report := "No agent report"
+			if job.Session != nil && job.Session.Report != nil && job.Session.Report.Summary != "" {
+				report = "Agent: " + firstReportLine(job.Session.Report.Summary)
+			}
+			lines = append(lines, "  "+report)
 		}
 	}
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], width, "…")
+	}
 	return strings.Join(lines, "\n")
+}
+
+func firstReportLine(summary string) string {
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.TrimSpace(line) != "" {
+			return renderLiteralLine(line)
+		}
+	}
+	return ""
+}
+
+func activity(job coordinator.JobFacts) string {
+	if job.Session == nil {
+		return "unknown"
+	}
+	return renderLiteralLine(job.Session.Activity)
 }
 
 func sessionAttention(job coordinator.JobFacts) bool {

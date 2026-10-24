@@ -10,7 +10,99 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
+	"github.com/muesli/termenv"
 )
+
+func TestDashboardWideShellShowsCardHierarchyAndTruthfulCounts(t *testing.T) {
+	attention := "review requested"
+	m := newModel(t.Context(), nil)
+	m.width, m.height = 120, 30
+	m.jobs = []coordinator.JobFacts{
+		{ID: "one", Name: "planner", Launch: "live", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "busy", Prompt: &coordinator.ObservedPrompt{Kind: "confirm"}, Report: &coordinator.AgentReport{Attention: &attention, Summary: "proposal ready"}}},
+		{ID: "two", Name: "unknown", Launch: "live", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "unknown"}},
+	}
+	m.selected = 0
+	view := ansi.Strip(m.View())
+	for _, required := range []string{"2 sessions", "1 with known attention", "1 observation unknown", "> planner", "Process Live", "[INPUT]", "[AGENT]", "Activity busy", "Agent: proposal ready", "Showing 1–2 of 2"} {
+		if !strings.Contains(view, required) {
+			t.Errorf("dashboard omitted %q:\n%s", required, view)
+		}
+	}
+}
+
+func TestDashboardUsesSplitOnlyAtApprovedThreshold(t *testing.T) {
+	for _, size := range []struct {
+		width, height int
+		split         bool
+	}{{120, 30, true}, {96, 24, true}, {95, 24, false}, {80, 24, false}} {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			m := newModel(t.Context(), nil)
+			m.width, m.height = size.width, size.height
+			m.jobs = []coordinator.JobFacts{{ID: "job", Name: "worker", Terminal: "live"}}
+			view := m.View()
+			if strings.Contains(view, "╭") != size.split {
+				t.Fatalf("split=%v, want %v:\n%s", strings.Contains(view, "╭"), size.split, view)
+			}
+		})
+	}
+}
+
+func TestSessionCardsPreserveStateAndSelectedViewport(t *testing.T) {
+	jobs := make([]coordinator.JobFacts, 30)
+	for index := range jobs {
+		jobs[index] = coordinator.JobFacts{ID: fmt.Sprintf("id-%d", index), Name: fmt.Sprintf("job-%02d", index), Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle"}}
+	}
+	for _, selected := range []int{0, 1, 2, 14, 28, 29} {
+		view := ansi.Strip(renderSessionList(jobs, selected, 40, 10))
+		if !strings.Contains(view, fmt.Sprintf("> job-%02d", selected)) || strings.Count(view, "Process Live") != 3 || len(strings.Split(view, "\n")) != 10 {
+			t.Fatalf("whole-card viewport lost selection %d:\n%s", selected, view)
+		}
+		if strings.Contains(view, "Activity idle · Activity") {
+			t.Fatalf("duplicated activity: %s", view)
+		}
+	}
+	jobs[0].Name = strings.Repeat("界", 100)
+	if view := renderSessionList(jobs[:1], 0, 40, 4); !strings.Contains(view, "Process Live") {
+		t.Fatalf("long name hid process state: %s", view)
+	}
+}
+
+func TestDashboardResponsiveBoundsAndCompleteWideBorders(t *testing.T) {
+	m := newModel(t.Context(), nil)
+	m.jobs = []coordinator.JobFacts{{ID: "job", Name: "worker", Terminal: "live"}}
+	for _, size := range []struct{ width, height int }{{120, 30}, {100, 30}, {96, 24}, {95, 24}, {80, 24}, {72, 12}, {71, 12}, {30, 12}, {20, 8}, {1, 1}, {160, 48}} {
+		m.width, m.height = size.width, size.height
+		view := m.View()
+		if lipgloss.Width(view) > size.width || lipgloss.Height(view) > size.height {
+			t.Errorf("%dx%d overflow:\n%s", size.width, size.height, view)
+		}
+		if size.width >= 96 && size.height >= 24 && strings.Count(view, "╰") != 2 {
+			t.Errorf("%dx%d clipped pane borders:\n%s", size.width, size.height, view)
+		}
+	}
+}
+
+func TestSessionCardsColorProfilesKeepSemanticMarkers(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	attention := "review"
+	jobs := []coordinator.JobFacts{{ID: "a", Name: "planner", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "busy", Prompt: &coordinator.ObservedPrompt{Kind: "confirm"}, Report: &coordinator.AgentReport{Attention: &attention}}}}
+	for _, profile := range []termenv.Profile{termenv.Ascii, termenv.ANSI} {
+		lipgloss.SetColorProfile(profile)
+		view := renderSessionList(jobs, 0, 44, 4)
+		for _, required := range []string{"> planner", "[INPUT] [AGENT]", "Process Live"} {
+			if !strings.Contains(ansi.Strip(view), required) {
+				t.Errorf("profile %v lost %q: %s", profile, required, view)
+			}
+		}
+		if profile == termenv.Ascii && strings.Contains(view, "\x1b") {
+			t.Fatalf("monochrome emits styling: %q", view)
+		}
+		if profile == termenv.ANSI && (!strings.Contains(view, "\x1b[1;36m") || !strings.Contains(view, "\x1b[33m")) {
+			t.Fatalf("limited color lost selection/attention hierarchy: %q", view)
+		}
+	}
+}
 
 func TestDashboardKeepsActionStatusInsideTheViewport(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{80, 24}, {100, 30}, {30, 12}} {
