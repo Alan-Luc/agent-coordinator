@@ -102,7 +102,7 @@ func TestCaptureUsesPaneTargetWithoutChangingGeometry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(argv)) != "-S\n/private/socket\n-N\ncapture-pane\n-p\n-t\n%7" {
+	if strings.TrimSpace(string(argv)) != "-S\n/private/socket\n-N\ncapture-pane\n-p\n-e\n-t\n%7" {
 		t.Fatalf("capture argv = %q", argv)
 	}
 }

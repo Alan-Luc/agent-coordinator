@@ -112,7 +112,7 @@ func (c Client) Capture(ctx context.Context, socket, paneID string) (string, err
 	if socket == "" || paneID == "" {
 		return "", fmt.Errorf("invalid tmux capture target")
 	}
-	out, err := c.command(ctx, "-S", socket, "-N", "capture-pane", "-p", "-t", paneID)
+	out, err := c.command(ctx, "-S", socket, "-N", "capture-pane", "-p", "-e", "-t", paneID)
 	if err != nil {
 		return "", fmt.Errorf("tmux pane capture failed")
 	}

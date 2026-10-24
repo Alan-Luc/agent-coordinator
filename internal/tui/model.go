@@ -17,7 +17,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 )
 
 type mode int
@@ -28,6 +27,7 @@ const (
 	confirmAction
 	composeMessage
 	confirmControl
+	help
 )
 
 type operation int
@@ -302,6 +302,15 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		return m, tea.ExecProcess(message.cmd, func(err error) tea.Msg { return attachFinishedMsg{err: err} })
 	case tea.KeyMsg:
+		if m.mode == help {
+			switch message.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc", "h", "q":
+				m.mode = dashboard
+			}
+			return m, nil
+		}
 		if m.busy {
 			return m, nil
 		}
@@ -344,6 +353,9 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch message.String() {
+		case "h":
+			m.viewGeneration++
+			m.mode = help
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "n":
@@ -670,6 +682,12 @@ func (m model) selectedJobValue() coordinator.JobFacts {
 }
 
 func (m model) View() string {
+	if m.mode == help {
+		return renderHelp(m.width, m.height)
+	}
+	if m.mode == dashboard && m.width >= 72 && m.height >= 16 {
+		return m.renderTableDashboard()
+	}
 	var view strings.Builder
 	narrow := m.width < 72 || m.height < 12
 	attentionCount, unknownCount := 0, 0
@@ -699,14 +717,7 @@ func (m model) View() string {
 	if m.mode != dashboard {
 		view.WriteString(m.renderModal(max(bodyHeight-1, 1)))
 	} else {
-		if m.width >= 96 && m.height >= 24 {
-			leftWidth := min(max(m.width*38/100, 32), 48)
-			rightWidth := m.width - leftWidth - 1
-			panelHeight := max(bodyHeight-4, 1)
-			leftPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("6")).Padding(0, 1).Width(leftWidth - 2).Height(panelHeight).Render(renderSessionList(m.jobs, m.selected, leftWidth-4, panelHeight))
-			rightPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.AdaptiveColor{Light: "8", Dark: "7"}).Padding(0, 1).Width(rightWidth - 2).Height(panelHeight).Render(renderObserve(m.selectedJobValue(), rightWidth-4, panelHeight, m.observe, m.previewText, m.previewError))
-			view.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
-		} else if narrow {
+		if narrow {
 			available := max(bodyHeight-2, 0)
 			previewHeight := min(4, max(available-1, 0))
 			listHeight := available - previewHeight
@@ -735,6 +746,116 @@ func (m model) View() string {
 		return body
 	}
 	return body + "\n" + footer
+}
+
+// Kanagawa Ink roles, borrowed from Pi without coupling the prototype to its theme loader.
+const (
+	inkText         = lipgloss.Color("#8ea49e")
+	inkPanel        = lipgloss.Color("#1F1F28")
+	inkSelected     = lipgloss.Color("#363646")
+	inkSelectedText = lipgloss.Color("#DCD7BA")
+	inkAccent       = lipgloss.Color("#8992a7")
+	inkBorder       = lipgloss.Color("#625e5a")
+)
+
+var inkWarning = lipgloss.CompleteColor{TrueColor: "#c4b28a", ANSI256: "180", ANSI: "3"}
+
+func renderSectionBar(text string, width int) string {
+	return lipgloss.NewStyle().Bold(true).Foreground(inkAccent).Background(inkPanel).Width(width).Render(ansi.Truncate(text, width, "…"))
+}
+
+func (m model) renderTableDashboard() string {
+	known, unknown := 0, 0
+	for _, job := range m.jobs {
+		if sessionAttention(job) {
+			known++
+		}
+		if job.Session == nil || job.Session.Activity == "unknown" {
+			unknown++
+		}
+	}
+	footerLines := strings.Split(m.renderFooter(false), "\n")
+	if !m.busy && m.height >= 24 {
+		footerLines[len(footerLines)-1] = renderSectionBar(" "+footerLines[len(footerLines)-1], m.width)
+	}
+	footer := clipView(strings.Join(footerLines, "\n"), m.width, m.height-1)
+	bodyHeight := m.height - lipgloss.Height(footer)
+	available := max(bodyHeight-1, 1)
+	// shortcut: fit around the usual 120-column native screen; measure captures if variable widths become important.
+	leftWidth := min(m.width/2-2, max(48, m.width-121))
+	rightWidth := m.width - leftWidth - 1
+	header := renderSectionBar(fmt.Sprintf(" Agent coordinator │ %d sessions │ attention %d │ unknown %d", len(m.jobs), known, unknown), m.width)
+	table := renderSessionTable(m.jobs, m.selected, leftWidth, available)
+	observe := renderObserve(m.selectedJobValue(), rightWidth, available, m.observe, m.previewText, m.previewError)
+	left := lipgloss.NewStyle().Width(leftWidth).Height(available).Render(clipView(table, leftWidth, available))
+	right := lipgloss.NewStyle().Width(rightWidth).Height(available).Render(observe)
+	divider := lipgloss.NewStyle().Foreground(inkBorder).Render(strings.Repeat("│\n", available-1) + "│")
+	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, divider, right)
+	body := clipView(header+"\n"+panes, m.width, bodyHeight)
+	body += strings.Repeat("\n", max(bodyHeight-lipgloss.Height(body), 0))
+	return lipgloss.NewStyle().Foreground(inkText).Render(body + "\n" + footer)
+}
+
+func renderSessionTable(jobs []coordinator.JobFacts, selected, width, height int) string {
+	capacity := max(height-2, 1)
+	start := min(max(selected-capacity+1, 0), max(len(jobs)-capacity, 0))
+	end := min(start+capacity, len(jobs))
+	nameWidth := max(width-30, 1)
+	if width >= 72 {
+		nameWidth = min(32, width/3)
+	}
+	cell := func(text string, width int) string {
+		text = ansi.Truncate(text, width, "…")
+		return text + strings.Repeat(" ", max(width-ansi.StringWidth(text), 0))
+	}
+	columns := func(name, process, activity, attention, report string) string {
+		if width >= 72 {
+			return cell(name, nameWidth) + " " + cell(process, 7) + " " + cell(activity, 8) + " " + cell(attention, 19) + " " + cell(report, width-nameWidth-40)
+		}
+		return cell(name, nameWidth) + " " + cell(process, 7) + " " + cell(attention, 19)
+	}
+	lines := []string{renderSectionBar(fmt.Sprintf(" Sessions · Showing %d–%d of %d", min(start+1, len(jobs)), end, len(jobs)), width)}
+	labels := "  " + columns("Session", "State", "Activity", "Attention", "Report")
+	lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(inkAccent).Render(ansi.Truncate(labels, width, "…")))
+	if len(jobs) == 0 {
+		lines = append(lines, "  No active rows · n new · l refresh")
+	}
+	for index := start; index < end; index++ {
+		job := jobs[index]
+		flags := ""
+		if job.Session != nil && job.Session.Prompt != nil {
+			flags += "[INPUT] "
+		}
+		if job.Session != nil && job.Session.Report != nil && job.Session.Report.Attention != nil && *job.Session.Report.Attention != "" {
+			flags += "[AGENT] "
+		}
+		if job.Session == nil || job.Session.Activity == "unknown" {
+			flags += "[?]"
+		}
+		flags = strings.TrimSpace(flags)
+		if flags == "" {
+			flags = "-"
+		}
+		process := lifecycle(job)
+		if job.Retired {
+			process = "retired"
+		} else if process == "Status unknown" {
+			process = "unknown"
+		}
+		report := "—"
+		if job.Session != nil && job.Session.Report != nil && job.Session.Report.Summary != "" {
+			report = firstReportLine(job.Session.Report.Summary)
+		}
+		row := "  " + columns(renderLiteralLine(job.Name), process, activity(job), flags, report)
+		if index == selected {
+			row = "> " + row[2:]
+			row = lipgloss.NewStyle().Bold(true).Foreground(inkSelectedText).Background(inkSelected).Render(row)
+		} else if sessionAttention(job) {
+			row = "  " + columns(renderLiteralLine(job.Name), process, activity(job), lipgloss.NewStyle().Foreground(inkWarning).Render(flags), report)
+		}
+		lines = append(lines, ansi.Truncate(row, width, "…"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderModal(height int) string {
@@ -834,13 +955,9 @@ func (m model) renderFooter(narrow bool) string {
 		}
 	}
 	if m.mode == dashboard && !m.busy {
-		if narrow {
-			lines = append(lines, "↑↓/o/Enter · n new · m send", "s stop · X force · d info", "c/r/f · l refresh · q quit")
-		} else {
-			lines = append(lines, "↑↓ select · Enter open · o Observe · n new · m steer", "s stop · X force-stop · d details · c Continue · r repair · f Forget", fmt.Sprintf("l refresh · q quit · %d clients share input · Shared cwd · F12 Return", m.selectedJobValue().Clients))
-			if m.height >= 24 {
-				lines = append(lines, "Pi readiness and task outcome are never inferred")
-			}
+		lines = append(lines, "h help · q quit")
+		if !narrow {
+			lines = append(lines, fmt.Sprintf("%d clients share input · cwd shared · F12 return · readiness/outcome unverified", m.selectedJobValue().Clients))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -993,6 +1110,9 @@ func sessionAttention(job coordinator.JobFacts) bool {
 func renderObserve(job coordinator.JobFacts, width, height int, visible bool, preview, previewError string) string {
 	width, height = max(width, 1), max(height, 1)
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true).Render("Observe · READ ONLY")
+	if width >= 32 && height >= 10 {
+		title = renderSectionBar(" Observe · READ ONLY", width)
+	}
 	if job.ID == "" && job.Name == "" {
 		return clipView(title+"\nSelect a session · n new", width, height)
 	}
@@ -1038,7 +1158,7 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 		if ansi.StringWidth(line) > width && width >= 24 {
 			line = ansi.Truncate(line, width-ansi.StringWidth(suffix), "…") + suffix
 		}
-		attention[index] = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(line)
+		attention[index] = lipgloss.NewStyle().Foreground(inkWarning).Render(line)
 	}
 	lines = append(lines, attention...)
 	lines = append(lines, coverage)
@@ -1072,17 +1192,6 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 	}
 	for index := range lines {
 		lines[index] = ansi.Truncate(lines[index], width, "…")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderPreview(output string, width int) string {
-	if width < 1 {
-		return ""
-	}
-	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
-	for index, line := range lines {
-		lines[index] = runewidth.Truncate(renderLiteralLine(line), width, "…")
 	}
 	return strings.Join(lines, "\n")
 }

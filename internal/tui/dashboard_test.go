@@ -13,7 +13,40 @@ import (
 	"github.com/muesli/termenv"
 )
 
-func TestDashboardWideShellShowsCardHierarchyAndTruthfulCounts(t *testing.T) {
+func TestTigPrototypeUsesDenseTableAndStrongSelection(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	attention := "review"
+	for _, profile := range []termenv.Profile{termenv.TrueColor, termenv.ANSI, termenv.Ascii} {
+		lipgloss.SetColorProfile(profile)
+		for _, size := range []struct{ width, height int }{{120, 30}, {80, 24}} {
+			m := newModel(t.Context(), nil)
+			m.width, m.height = size.width, size.height
+			m.jobs = []coordinator.JobFacts{{ID: "id", Name: "planner", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "busy", Prompt: &coordinator.ObservedPrompt{Kind: "confirm"}, Report: &coordinator.AgentReport{Summary: "proposal ready", Attention: &attention}}}}
+			view := m.View()
+			plain := ansi.Strip(view)
+			if strings.Contains(plain, "╭") || !strings.Contains(plain, "Session") || !strings.Contains(plain, "Attention") || !strings.Contains(plain, "Agent report") {
+				t.Errorf("prototype still uses boxed cards instead of table columns:\n%s", plain)
+			}
+			for _, required := range []string{"> planner", "[INPUT]", "[AGENT]", "Observe · READ ONLY", "q quit"} {
+				if !strings.Contains(plain, required) {
+					t.Errorf("prototype lost %q:\n%s", required, plain)
+				}
+			}
+			if profile == termenv.TrueColor && (!strings.Contains(view, "48;2;54;54;70m") || !strings.Contains(view, "38;2;220;215;186")) {
+				t.Errorf("selected row does not use Kanagawa Ink selectedBg: %q", view)
+			}
+			if profile == termenv.Ascii && strings.Contains(view, "\x1b") {
+				t.Errorf("monochrome contains color sequences")
+			}
+			if lipgloss.Width(view) > size.width || lipgloss.Height(view) > size.height {
+				t.Errorf("prototype exceeds terminal bounds")
+			}
+		}
+	}
+}
+
+func TestDashboardTableShowsHierarchyAndTruthfulCounts(t *testing.T) {
 	attention := "review requested"
 	m := newModel(t.Context(), nil)
 	m.width, m.height = 120, 30
@@ -23,27 +56,66 @@ func TestDashboardWideShellShowsCardHierarchyAndTruthfulCounts(t *testing.T) {
 	}
 	m.selected = 0
 	view := ansi.Strip(m.View())
-	for _, required := range []string{"2 sessions", "1 with known attention", "1 observation unknown", "> planner", "Process Live", "[INPUT]", "[AGENT]", "Activity busy", "Agent: proposal ready", "Showing 1–2 of 2"} {
+	for _, required := range []string{"2 sessions", "attention 1", "unknown 1", "> planner", "Live", "[INPUT]", "[AGENT]", "busy", "proposal ready", "Showing 1–2 of 2"} {
 		if !strings.Contains(view, required) {
 			t.Errorf("dashboard omitted %q:\n%s", required, view)
 		}
 	}
 }
 
-func TestDashboardUsesSplitOnlyAtApprovedThreshold(t *testing.T) {
+func TestDashboardPrototypeUsesBorderlessVerticalSplit(t *testing.T) {
 	for _, size := range []struct {
 		width, height int
-		split         bool
-	}{{120, 30, true}, {96, 24, true}, {95, 24, false}, {80, 24, false}} {
+	}{{120, 30}, {96, 24}, {95, 24}, {80, 24}} {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
 			m := newModel(t.Context(), nil)
 			m.width, m.height = size.width, size.height
 			m.jobs = []coordinator.JobFacts{{ID: "job", Name: "worker", Terminal: "live"}}
-			view := m.View()
-			if strings.Contains(view, "╭") != size.split {
-				t.Fatalf("split=%v, want %v:\n%s", strings.Contains(view, "╭"), size.split, view)
+			view := ansi.Strip(m.View())
+			paneTitles := strings.Split(view, "\n")[1]
+			if strings.Contains(view, "╭") || !strings.Contains(paneTitles, "Sessions") || !strings.Contains(paneTitles, "│") || !strings.Contains(paneTitles, "Observe · READ ONLY") {
+				t.Fatalf("expected borderless left/right panes on the same row:\n%s", view)
 			}
 		})
+	}
+}
+
+func TestTigWideDashboardUsesSpaceForSessionContext(t *testing.T) {
+	m := newModel(t.Context(), nil)
+	m.width, m.height = 260, 45
+	m.jobs = []coordinator.JobFacts{{ID: "job", Name: "update-pi-background-tasks", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "busy", Report: &coordinator.AgentReport{Summary: "proposal ready"}}}}
+	view := ansi.Strip(m.View())
+	lines := strings.Split(view, "\n")
+	if divider := ansi.StringWidth(strings.SplitN(lines[1], "│", 2)[0]); divider < 100 || divider > 130 {
+		t.Errorf("wide layout still gives nearly all width to Observe: %q", lines[1])
+	}
+	leftHeader := strings.SplitN(lines[2], "│", 2)[0]
+	leftRow := strings.SplitN(lines[3], "│", 2)[0]
+	for _, required := range []string{"Activity", "Report"} {
+		if !strings.Contains(leftHeader, required) {
+			t.Errorf("wide table omitted %q: %s", required, leftHeader)
+		}
+	}
+	for _, required := range []string{"update-pi-background-tasks", "busy", "proposal ready"} {
+		if !strings.Contains(leftRow, required) {
+			t.Errorf("wide row omitted %q: %s", required, leftRow)
+		}
+	}
+	if lipgloss.Width(m.View()) > m.width || lipgloss.Height(m.View()) > m.height {
+		t.Fatal("wide dashboard exceeds terminal bounds")
+	}
+}
+
+func TestTigVerticalSplitUsesFullSessionViewport(t *testing.T) {
+	m := newModel(t.Context(), nil)
+	m.width, m.height = 120, 30
+	for index := range 30 {
+		m.jobs = append(m.jobs, coordinator.JobFacts{ID: fmt.Sprintf("id-%d", index), Name: fmt.Sprintf("job-%02d", index), Terminal: "live"})
+	}
+	m.selected = 29
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "> job-29") || strings.Contains(view, "job-00") || strings.Count(view, "job-") < 12 {
+		t.Fatalf("vertical table did not use its height or retain selection:\n%s", view)
 	}
 }
 
@@ -67,7 +139,7 @@ func TestSessionCardsPreserveStateAndSelectedViewport(t *testing.T) {
 	}
 }
 
-func TestDashboardResponsiveBoundsAndCompleteWideBorders(t *testing.T) {
+func TestDashboardResponsiveBoundsAndVisibleSections(t *testing.T) {
 	m := newModel(t.Context(), nil)
 	m.jobs = []coordinator.JobFacts{{ID: "job", Name: "worker", Terminal: "live"}}
 	for _, size := range []struct{ width, height int }{{120, 30}, {100, 30}, {96, 24}, {95, 24}, {80, 24}, {72, 12}, {71, 12}, {30, 12}, {20, 8}, {1, 1}, {160, 48}} {
@@ -76,8 +148,8 @@ func TestDashboardResponsiveBoundsAndCompleteWideBorders(t *testing.T) {
 		if lipgloss.Width(view) > size.width || lipgloss.Height(view) > size.height {
 			t.Errorf("%dx%d overflow:\n%s", size.width, size.height, view)
 		}
-		if size.width >= 96 && size.height >= 24 && strings.Count(view, "╰") != 2 {
-			t.Errorf("%dx%d clipped pane borders:\n%s", size.width, size.height, view)
+		if size.width >= 96 && size.height >= 24 && (!strings.Contains(view, "Sessions · Showing") || !strings.Contains(view, "Observe · READ ONLY")) {
+			t.Errorf("%dx%d clipped table/Observe sections:\n%s", size.width, size.height, view)
 		}
 	}
 }
@@ -425,10 +497,17 @@ func TestPreviewResultCannotOverwriteNewerSelection(t *testing.T) {
 }
 
 func TestDashboardOffersLiteralSteeringAndConfirmedStopControls(t *testing.T) {
-	view := newModel(t.Context(), nil).View()
-	for _, key := range []string{"m steer", "s stop", "X force-stop"} {
-		if !strings.Contains(view, key) {
-			t.Errorf("dashboard omits targeted control %q:\\n%s", key, view)
+	m := newModel(t.Context(), nil)
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "h help · q quit") || strings.Contains(view, "X force-stop") {
+		t.Fatalf("dashboard footer is not compact:\\n%s", view)
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	m = updated.(model)
+	help := ansi.Strip(m.View())
+	for _, key := range []string{"↑/↓ select", "Enter open", "o toggle Observe", "n create", "m steer", "s request graceful stop", "X force-stop", "d details", "c process Continue", "r repair", "f Forget ended job", "l refresh", "q / Esc / h close", "Ctrl+C quit", "F12 Return"} {
+		if !strings.Contains(help, key) {
+			t.Errorf("help omits binding %q:\\n%s", key, help)
 		}
 	}
 }

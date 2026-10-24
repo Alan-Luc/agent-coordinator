@@ -7,6 +7,8 @@ import (
 
 	"agent-coordinator/internal/coordinator"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestTaskFormPreservesMultilineBodyAndSubmits(t *testing.T) {
@@ -157,6 +159,56 @@ func TestTaskFormAddsSingleSpace(t *testing.T) {
 	}
 }
 
+func TestHelpConsumesKeysWithoutTriggeringDashboardActions(t *testing.T) {
+	m := newModel(context.Background(), nil)
+	m.jobs = []coordinator.JobFacts{{ID: "job", Name: "worker"}}
+	opened, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	got := opened.(model)
+	for _, key := range []string{"n", "d", "c", "s", "X"} {
+		updated, command := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if command != nil || updated.(model).mode != help {
+			t.Fatalf("help key %q escaped or triggered an action", key)
+		}
+	}
+	for _, key := range []string{"esc", "q", "h"} {
+		typeCode := tea.KeyRunes
+		if key == "esc" {
+			typeCode = tea.KeyEsc
+		}
+		updated, _ := got.Update(tea.KeyMsg{Type: typeCode, Runes: []rune(key)})
+		if updated.(model).mode != dashboard {
+			t.Fatalf("%s did not close help", key)
+		}
+	}
+	updated, command := got.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if updated.(model).mode != help || command == nil {
+		t.Fatal("Ctrl+C should quit without changing the help state")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatal("Ctrl+C did not return a quit command")
+	}
+}
+
+func TestHelpFitsTinyAndOrdinaryTerminals(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{1, 1}, {20, 8}, {80, 24}, {120, 30}} {
+		view := renderHelp(size.width, size.height)
+		if lipgloss.Width(view) > size.width || lipgloss.Height(view) > size.height {
+			t.Errorf("help exceeds %dx%d: %dx%d", size.width, size.height, lipgloss.Width(view), lipgloss.Height(view))
+		}
+		if size.width >= 80 {
+			plain := ansi.Strip(view)
+			for _, binding := range []string{"↑/↓ select session", "Enter open session", "o toggle Observe", "n create new", "m steer", "s request graceful stop", "X force-stop", "d details", "c process Continue", "r repair", "f Forget", "l refresh", "q / Esc / h close", "F12 Return"} {
+				if !strings.Contains(plain, binding) {
+					t.Errorf("%dx%d help omitted %q:\n%s", size.width, size.height, binding, plain)
+				}
+			}
+			if !strings.Contains(plain, "╭") || !strings.Contains(plain, "╮") || !strings.Contains(plain, "╰") || !strings.Contains(plain, "╯") {
+				t.Errorf("%dx%d help lost its full panel border:\n%s", size.width, size.height, plain)
+			}
+		}
+	}
+}
+
 func TestOperationErrorsRemainVisible(t *testing.T) {
 	m := newModel(context.Background(), nil)
 	updated, _ := m.Update(resultMsg{operation: startJob, err: context.DeadlineExceeded})
@@ -170,7 +222,10 @@ func TestDashboardExplainsUnknownOutcomeAndSharedInput(t *testing.T) {
 	m := newModel(context.Background(), nil)
 	m.jobs = []coordinator.JobFacts{{Name: "worker", Launch: "submitted", Terminal: "live", PiReadiness: "unverified", TaskOutcome: "unknown", Clients: 1}}
 	view := m.View()
-	if !strings.Contains(view, "Shared cwd") || !strings.Contains(view, "F12 Return") || !strings.Contains(view, "outcome are never inferred") {
+	if !strings.Contains(view, "cwd shared") || !strings.Contains(view, "F12 return") || !strings.Contains(view, "readiness/outcome unverified") {
 		t.Fatalf("dashboard omitted lifecycle warnings:\n%s", view)
+	}
+	if lipgloss.Width(m.renderFooter(false)) > 80 {
+		t.Fatalf("compact footer wraps at 80 columns: %q", m.renderFooter(false))
 	}
 }

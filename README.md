@@ -22,15 +22,23 @@ digits, `_`, `.`, `/`, and `-`, to avoid tmux command-parser ambiguity.
 
 ## Dashboard
 
-Compact session cards keep names, process state, activity and attention distinct.
-At 96×24 and above, the list sits beside a larger **Observe · READ ONLY** pane;
-smaller terminals stack them. Below 72×12, resize for full identity and recovery
-text. Selection uses `>` even without color; `[INPUT]` marks an observed native
-prompt, `[AGENT]` an explicit agent request, and `[?]` unknown observation.
+A dense session table sits beside **Observe · READ ONLY** at 72×16 and above.
+Wide windows add activity and agent-report columns; smaller terminals use a
+compact fallback. Below 72×12, resize for full identity and recovery text.
+The dashboard uses a fixed Kanagawa Ink palette. Selection uses `>` even without
+color; `[INPUT]` marks an observed native prompt, `[AGENT]` an explicit agent
+request, and `[?]` unknown observation.
+
+Press **h** for centered keyboard help, then **Esc**, **h**, or **q** to close it.
+**Ctrl+C** quits from either view. The compact footer keeps shared-input and
+readiness/outcome guidance visible; action errors and confirmation warnings are
+not hidden in help.
 
 **Enter** opens that same native Pi session; **F12 Return** detaches only your
 client. Observe captures the current screen, not scrollback, without forwarding
-input or resizing Pi. **o** hides only the output; selected facts and attention
+input or resizing Pi. It preserves validated colors and basic text styles while
+filtering terminal-control sequences; captured content is not an attention or
+control-authority source. **o** hides only the output; selected facts and attention
 remain visible. Forms show the active field and retain literal multiline drafts;
 confirmations label the full target identity and never default to yes.
 
