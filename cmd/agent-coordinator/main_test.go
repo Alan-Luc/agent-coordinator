@@ -51,6 +51,21 @@ func TestRejectInvalidRequestsWithoutLeakingTask(t *testing.T) {
 	}
 }
 
+func TestListAcceptsSessionInfoFlag(t *testing.T) {
+	t.Setenv("AC_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+	for _, args := range [][]string{{"list", "--json"}, {"list", "--session-info", "--json"}} {
+		input := inputFile(t, "")
+		var output, errors bytes.Buffer
+		if code := run(args, input, &output, &errors); code != 0 {
+			t.Fatalf("list args %v: exit %d: %s", args, code, errors.String())
+		}
+		var result coordinator.ListResult
+		if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+			t.Fatalf("list args %v returned invalid JSON: %v", args, err)
+		}
+	}
+}
+
 func TestDashboardRejectsNonTerminalWithUsageExit(t *testing.T) {
 	t.Setenv("AC_STATE_DIR", filepath.Join(t.TempDir(), "state"))
 	input := inputFile(t, "")
@@ -60,6 +75,24 @@ func TestDashboardRejectsNonTerminalWithUsageExit(t *testing.T) {
 	var output, errors bytes.Buffer
 	if code := run(nil, input, &output, &errors); code != 2 {
 		t.Fatalf("exit code %d, expected 2 for unsupported terminal", code)
+	}
+}
+
+func TestStopRequiresInteractiveConfirmationBeforeTargetLookup(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	t.Setenv("AC_STATE_DIR", state)
+	input := inputFile(t, "")
+	var output, errors bytes.Buffer
+	const id = "123e4567-e89b-42d3-a456-426614174000"
+	if code := run([]string{"stop", id}, input, &output, &errors); code != 2 {
+		t.Fatalf("non-terminal stop exit = %d, want 2", code)
+	}
+	entries, err := os.ReadDir(filepath.Join(state, "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("stop created job-side effects before confirmation: %v", entries)
 	}
 }
 

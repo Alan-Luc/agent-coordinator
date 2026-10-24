@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func (c *Coordinator) facts(ctx context.Context, m Manifest, l Launch) JobFacts {
@@ -16,6 +17,9 @@ func (c *Coordinator) facts(ctx context.Context, m Manifest, l Launch) JobFacts 
 	}
 	if l.Schema != SchemaVersion || m.Schema != SchemaVersion || m.Owner != c.store.token || m.Protocol != ProtocolVersion {
 		return unknown("record schema or ownership mismatch")
+	}
+	if m.BootIDScheme != BootIdentityScheme || !bootUUIDPattern.MatchString(m.BootID) {
+		return unknown("legacy or unsupported boot identity; native session may still be live")
 	}
 	if l.Phase == "preexec" {
 		f.Launch = "starting"
@@ -77,6 +81,9 @@ func (c *Coordinator) facts(ctx context.Context, m Manifest, l Launch) JobFacts 
 		f.Launch = "submitted"
 		f.Terminal = "live"
 		f.NextAction = "enter or observe"
+		if status, statusErr := readSessionStatus(filepath.Join(c.store.root, "jobs", m.ID, "session.json"), time.Now()); statusErr == nil && validateSessionStatus(status, m.ID, m.Owner, pane.PID, time.Now()) == nil {
+			f.Session = &status
+		}
 		return f
 	}
 	socketPresent := false
@@ -171,11 +178,18 @@ func (c *Coordinator) resolve(target string, byID bool) (string, error) {
 	if err != nil {
 		return "", actionError(1, "registry_unavailable", "job registry is unavailable", false, "", target)
 	}
+	matchedID := ""
 	for _, id := range ids {
 		m, l, err := c.store.load(id)
-		if err == nil && m.Name == target && !l.Retired {
-			return id, nil
+		if err == nil && m.Name == target && (!l.Retired || hasLegacyProcessEvidence(m, l)) {
+			if matchedID != "" {
+				return "", actionError(1, "ambiguous_name", "multiple records reserve this name; use a job UUID", false, "", target)
+			}
+			matchedID = id
 		}
+	}
+	if matchedID != "" {
+		return matchedID, nil
 	}
 	return "", actionError(1, "not_found", "job not found", false, "", target)
 }

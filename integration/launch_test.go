@@ -552,11 +552,10 @@ func collectStartDiagnostics(job *fakeJob) {
 			report.TmuxFacts = string(output)
 		}
 	}
-	boot, err := unix.SysctlTimeval("kern.boottime")
-	if err != nil {
-		report.KernelBootError = err.Error()
-	} else {
-		report.KernelBootID = strconv.FormatInt(boot.Sec, 10) + "." + strconv.FormatInt(int64(boot.Usec), 10)
+	bootID, bootErr := currentKernelBootID()
+	report.KernelBootID = bootID
+	if bootErr != nil {
+		report.KernelBootError = bootErr.Error()
 	}
 	if launch.Server != nil {
 		report.ServerCurrent, report.ServerError = currentKernelIdentity(launch.Server.PID, report.KernelBootID)
@@ -759,11 +758,10 @@ func identitiesEnded(server, pane processIdentity) bool {
 }
 
 func processIdentityEnded(recorded processIdentity) (bool, error) {
-	boot, err := unix.SysctlTimeval("kern.boottime")
+	bootID, err := currentKernelBootID()
 	if err != nil {
 		return false, err
 	}
-	bootID := strconv.FormatInt(boot.Sec, 10) + "." + strconv.FormatInt(int64(boot.Usec), 10)
 	if recorded.BootID != bootID {
 		return true, nil
 	}

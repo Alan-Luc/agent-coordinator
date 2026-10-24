@@ -19,7 +19,7 @@ func TestForgetRevokesPreexecBeforeRemovingTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(filepath.Dir(socket))) })
-	m := Manifest{Schema: SchemaVersion, ID: id, Name: "job", Owner: s.token, Cwd: t.TempDir(), Pi: "/bin/true", Tmux: "/bin/true", Coordinator: "/bin/true", BootID: "testboot", Protocol: ProtocolVersion, Socket: socket}
+	m := Manifest{Schema: SchemaVersion, ID: id, Name: "job", Owner: s.token, Cwd: t.TempDir(), Pi: "/bin/true", Tmux: "/bin/true", Coordinator: "/bin/true", BootID: "00000000-0000-0000-0000-000000000000", BootIDScheme: BootIdentityScheme, Protocol: ProtocolVersion, Socket: socket}
 	dir := filepath.Join(root, "jobs", id)
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -56,7 +56,7 @@ func TestForgetRevokesPreexecBeforeRemovingTask(t *testing.T) {
 
 func TestFactsDoNotClaimReadinessOrTaskSuccess(t *testing.T) {
 	c := &Coordinator{store: &store{token: "0123456789abcdef"}}
-	m := Manifest{Schema: SchemaVersion, ID: "123e4567-e89b-42d3-a456-426614174000", Name: "job", Owner: c.store.token, Protocol: ProtocolVersion, BootID: "boot"}
+	m := Manifest{Schema: SchemaVersion, ID: "123e4567-e89b-42d3-a456-426614174000", Name: "job", Owner: c.store.token, Protocol: ProtocolVersion, BootID: "00000000-0000-0000-0000-000000000000", BootIDScheme: BootIdentityScheme}
 	f := c.facts(context.Background(), m, Launch{Schema: SchemaVersion, Phase: "preexec"})
 	if f.Launch != "starting" || f.PiReadiness != "unverified" || f.TaskOutcome != "unknown" {
 		t.Fatalf("unexpected facts: %#v", f)

@@ -21,6 +21,11 @@ import (
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
 var idPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var tokenPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
+var bootUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+func hasLegacyProcessEvidence(m Manifest, l Launch) bool {
+	return m.BootIDScheme != BootIdentityScheme && (l.Server != nil || l.Pane != nil)
+}
 
 type store struct{ root, token string }
 type ownerRecord struct {
@@ -303,7 +308,7 @@ func (s *store) load(id string) (Manifest, Launch, error) {
 	if err := readJSON(filepath.Join(p, "launch.json"), &l); err != nil {
 		return m, l, err
 	}
-	if m.Schema != SchemaVersion || l.Schema != SchemaVersion || m.ID != id || m.Owner != s.token || m.Protocol != ProtocolVersion || m.BootID == "" || validateName(m.Name) != nil {
+	if m.Schema != SchemaVersion || l.Schema != SchemaVersion || m.ID != id || m.Owner != s.token || m.Protocol != ProtocolVersion || m.BootID == "" || validateName(m.Name) != nil || (m.BootIDScheme != "" && m.BootIDScheme != BootIdentityScheme) || (m.BootIDScheme == BootIdentityScheme && !bootUUIDPattern.MatchString(m.BootID)) {
 		return m, l, errors.New("unknown or invalid job schema/ownership")
 	}
 	expected, err := s.socket(id, false)
@@ -319,7 +324,7 @@ func (s *store) load(id string) (Manifest, Launch, error) {
 		return m, l, errors.New("missing launch process evidence")
 	}
 	for _, identity := range []*ProcessIdentity{l.Server, l.Pane} {
-		if identity != nil && (!validProcessIdentity(*identity) || identity.BootID != m.BootID) {
+		if identity != nil && (!validProcessIdentity(*identity) || identity.BootID != m.BootID || (m.BootIDScheme == BootIdentityScheme && !bootUUIDPattern.MatchString(identity.BootID))) {
 			return m, l, errors.New("invalid recorded process evidence")
 		}
 	}

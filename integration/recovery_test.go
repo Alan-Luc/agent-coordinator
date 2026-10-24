@@ -8,13 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 func TestRealCLIRefusesForgetForClaimedLivePi(t *testing.T) {
@@ -162,11 +159,10 @@ func TestRealCLIRepairsOnlyAnOwnedMissingSocket(t *testing.T) {
 	if err != nil || json.Unmarshal(content, &recorded) != nil || recorded.Server == nil || recorded.Pane == nil {
 		t.Fatalf("read exact recorded server/pane identities before socket removal: %v", err)
 	}
-	boot, err := unix.SysctlTimeval("kern.boottime")
+	bootID, err := currentKernelBootID()
 	if err != nil {
 		t.Fatalf("read current kernel boot identity: %v", err)
 	}
-	bootID := strconv.FormatInt(boot.Sec, 10) + "." + strconv.FormatInt(int64(boot.Usec), 10)
 	server, serverErr := currentKernelIdentity(recorded.Server.PID, bootID)
 	pane, paneErr := currentKernelIdentity(recorded.Pane.PID, bootID)
 	if serverErr != "" || paneErr != "" || !sameProcessIdentity(recorded.Server, server) || !sameProcessIdentity(recorded.Pane, pane) {

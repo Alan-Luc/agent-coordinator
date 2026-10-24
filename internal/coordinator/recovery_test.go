@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,6 +13,161 @@ import (
 	"testing"
 	"time"
 )
+
+func TestForgetRefusesClaimedLegacyRecordEvenWhenMarkedRevoked(t *testing.T) {
+	s, err := openStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "123e4567-e89b-42d3-a456-426614174066"
+	live, err := identifyProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket, err := createLifecycleRecord(t, s, id, "legacy-retired", "revoked", &live, &live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(filepath.Dir(socket))) })
+	m, l, err := s.load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.BootIDScheme, m.BootID = "", "1791325452.900746"
+	l.Server.BootID, l.Pane.BootID = m.BootID, m.BootID
+	dir := filepath.Join(s.root, "jobs", id)
+	if err := writeJSON(dir, "manifest.json", m); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(dir, "launch.json", l); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.load(id); err != nil {
+		t.Fatalf("legacy setup is not readable: %v", err)
+	}
+	c := &Coordinator{store: s}
+	err = c.Forget(t.Context(), id, true)
+	var action *ActionError
+	if !errors.As(err, &action) || action.Diagnostic.Code != "legacy_identity" {
+		t.Fatalf("ambiguous claimed legacy work was not refused: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "initial-task.txt"))
+	if err != nil || string(body) != "task" {
+		t.Fatalf("legacy task content was deleted: %q %v", body, err)
+	}
+}
+
+func TestClaimedLegacyRetiredFlagCannotReleaseName(t *testing.T) {
+	s, err := openStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "123e4567-e89b-42d3-a456-426614174068"
+	live, err := identifyProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket, err := createLifecycleRecord(t, s, id, "legacy-name", "revoked", &live, &live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(filepath.Dir(socket))) })
+	m, l, err := s.load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.BootIDScheme, m.BootID = "", "1791325452.900746"
+	l.Server.BootID, l.Pane.BootID = m.BootID, m.BootID
+	dir := filepath.Join(s.root, "jobs", id)
+	if err := writeJSON(dir, "manifest.json", m); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(dir, "launch.json", l); err != nil {
+		t.Fatal(err)
+	}
+	fakeTmux := filepath.Join(t.TempDir(), "tmux")
+	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\nif [ \"$1\" = -V ]; then printf 'tmux 3.5\\n'; exit 0; fi\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	c := &Coordinator{store: s, options: Options{PiPath: "/usr/bin/true", TmuxPath: fakeTmux, Executable: "/usr/bin/true"}}
+	t.Run("resolve-visible-legacy-name", func(t *testing.T) {
+		got, err := c.resolve(m.Name, false)
+		if err != nil || got != id {
+			t.Fatalf("uncertain legacy name silently released: id=%s err=%v", got, err)
+		}
+	})
+	t.Run("refuse-name-reuse", func(t *testing.T) {
+		_, err := c.Start(t.Context(), m.Name, t.TempDir(), []byte("must not launch"))
+		var action *ActionError
+		if !errors.As(err, &action) || action.Diagnostic.Code != "duplicate_name" {
+			t.Fatalf("legacy retired flag authorized name reuse: %v", err)
+		}
+	})
+	t.Run("refuse-already-ambiguous-name", func(t *testing.T) {
+		if _, err := createLifecycleRecord(t, s, "123e4567-e89b-42d3-a456-426614174069", m.Name, "preexec", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		_, err := c.resolve(m.Name, false)
+		var action *ActionError
+		if !errors.As(err, &action) || action.Diagnostic.Code != "ambiguous_name" {
+			t.Fatalf("ambiguous legacy name selected a different UUID: %v", err)
+		}
+	})
+}
+
+func TestEndedControllerCleanupPreservesUnprovenEndpoints(t *testing.T) {
+	for _, kind := range []string{"live-listener", "ordinary-file"} {
+		t.Run(kind, func(t *testing.T) {
+			s, err := openStore(filepath.Join(t.TempDir(), "state"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			process := exec.Command("/bin/sleep", "0.2")
+			if err := process.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pane, err := identifyProcess(process.Process.Pid)
+			if err != nil {
+				_ = process.Wait()
+				t.Fatal(err)
+			}
+			if err := process.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			id := "123e4567-e89b-42d3-a456-426614174067"
+			socket, err := createLifecycleRecord(t, s, id, "endpoint-proof", "revoked", nil, &pane)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(filepath.Dir(socket))) })
+			m, l, err := s.load(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			endpoint := controlEndpoint(socket)
+			if kind == "live-listener" {
+				listener, err := net.Listen("unix", endpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+			} else if err := os.WriteFile(endpoint, []byte("not a controller socket"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := removeEndedControlEndpoint(t.Context(), m, l); err == nil {
+				t.Fatalf("cleanup accepted %s", kind)
+			}
+			after, err := os.Lstat(endpoint)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("cleanup removed unproven %s: %v", kind, err)
+			}
+		})
+	}
+}
 
 func TestForgetRevokedResidueByIDAfterNameReuse(t *testing.T) {
 	assertForgetNoIdentityResidue(t, "revoked", true)
@@ -398,7 +554,7 @@ func createLifecycleRecord(t *testing.T, s *store, id, name, phase string, serve
 	if err != nil {
 		return "", err
 	}
-	m := Manifest{Schema: SchemaVersion, ID: id, Name: name, Owner: s.token, Cwd: t.TempDir(), Pi: "/bin/true", Tmux: "/bin/true", Coordinator: "/bin/true", BootID: boot, Protocol: ProtocolVersion, Socket: socket}
+	m := Manifest{Schema: SchemaVersion, ID: id, Name: name, Owner: s.token, Cwd: t.TempDir(), Pi: "/bin/true", Tmux: "/bin/true", Coordinator: "/bin/true", BootID: boot, BootIDScheme: BootIdentityScheme, Protocol: ProtocolVersion, Socket: socket}
 	dir := filepath.Join(s.root, "jobs", id)
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return "", err

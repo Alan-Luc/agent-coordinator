@@ -149,7 +149,7 @@ func (c *Coordinator) Start(ctx context.Context, name, cwd string, task []byte) 
 	}
 	for _, id := range ids {
 		m, l, loadErr := c.store.load(id)
-		if m.Name == name && (!l.Retired || loadErr != nil) {
+		if m.Name == name && (!l.Retired || loadErr != nil || hasLegacyProcessEvidence(m, l)) {
 			return JobFacts{}, actionError(3, "duplicate_name", "name is already reserved; inspect list or doctor", false, id, name)
 		}
 	}
@@ -162,18 +162,19 @@ func (c *Coordinator) Start(ctx context.Context, name, cwd string, task []byte) 
 		return JobFacts{}, err
 	}
 	m := Manifest{
-		Schema:      SchemaVersion,
-		ID:          id,
-		Name:        name,
-		Owner:       c.store.token,
-		Cwd:         directory,
-		Pi:          pi,
-		Tmux:        tmuxPath,
-		Coordinator: self,
-		Created:     time.Now().UTC(),
-		BootID:      boot,
-		Protocol:    ProtocolVersion,
-		Socket:      socket,
+		Schema:       SchemaVersion,
+		ID:           id,
+		Name:         name,
+		Owner:        c.store.token,
+		Cwd:          directory,
+		Pi:           pi,
+		Tmux:         tmuxPath,
+		Coordinator:  self,
+		Created:      time.Now().UTC(),
+		BootID:       boot,
+		BootIDScheme: BootIdentityScheme,
+		Protocol:     ProtocolVersion,
+		Socket:       socket,
 	}
 	staging, err := os.MkdirTemp(filepath.Join(c.store.root, "jobs"), ".staging-")
 	if err != nil {

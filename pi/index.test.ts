@@ -1,10 +1,33 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, chmod, readFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { Value } from "typebox/value";
 import { cliArguments, coordinatorTool, parseResult, registerCoordinator, runCli } from "./index.ts";
+import { parseControlRequest, updateAgentReport, updateObservedActivity, updateObservedPrompt, verifyInheritedJob } from "./session-control.ts";
+import type { SessionStatus } from "./control-protocol.ts";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function commandLog(text: string): string[][] {
+  return text.trim().split("\n").map((line) => {
+    const parsed: unknown = JSON.parse(line);
+    assert.ok(Array.isArray(parsed));
+    const args: string[] = [];
+    for (const value of parsed) { assert.ok(typeof value === "string"); args.push(value); }
+    return args;
+  });
+}
+
+function errorCode(value: unknown): string {
+  assert.ok(isRecord(value) && isRecord(value.details) && isRecord(value.details.error));
+  const code = value.details.error.code;
+  assert.ok(typeof code === "string");
+  return code;
+}
 
 function register() {
   let registrations = 0;
@@ -13,6 +36,179 @@ function register() {
   assert.ok(registeredCoordinator, "registerCoordinator should pass the coordinator tool to the host");
   return { tool: coordinatorTool, registrations };
 }
+
+test("report tools retain their own controller when another runtime registers", async () => {
+  function bindReport(status: SessionStatus) {
+    let execute: (...args: unknown[]) => unknown = () => { throw new Error("tool not registered"); };
+    registerCoordinator({ registerTool(tool) { execute = (...args) => Reflect.apply(tool.execute, undefined, args); } }, {
+      status: () => status,
+      report: async () => status,
+    });
+    return () => execute("call", { request: { action: "report", summary: "working" } }, undefined, undefined, { sessionManager: { getSessionId: () => status.session_id } });
+  }
+  const first: SessionStatus = { protocol: 1, job_id: "first", owner: "owner", session_id: "native-a", generation: "runtime-a", pid: 1, updated_at: 1, activity: "idle" };
+  const invokeFirst = bindReport(first);
+  bindReport({ ...first, job_id: "second", session_id: "native-b", generation: "runtime-b" });
+  const result = await invokeFirst();
+  assert.ok(isRecord(result) && isRecord(result.structuredContent) && isRecord(result.structuredContent.reported));
+  assert.equal(result.structuredContent.reported.job_id, "first", "another runtime must not retarget a report");
+});
+
+test("control requests accept only the contract actions", () => {
+  const { tool } = register();
+  assert.ok(tool);
+  for (const request of [
+    { action: "send", id: "123e4567-e89b-42d3-a456-426614174000", text: "literal", request_id: "123e4567-e89b-42d3-a456-426614174001" },
+    { action: "report", summary: "working" },
+    { action: "report", summary: "working", attention: null },
+    { action: "stop", id: "123e4567-e89b-42d3-a456-426614174000" },
+    { action: "force_stop", id: "123e4567-e89b-42d3-a456-426614174000" },
+  ]) assert.equal(Value.Check(tool.parameters, { request }), true, `${request.action} request should be accepted`);
+  assert.equal(Value.Check(tool.parameters, { request: { action: "report", summary: "x", extra: true } }), false);
+});
+
+test("control protocol strictly bounds UTF-8 text and rejects unknown fields", () => {
+  const base = { protocol: 1, job_id: "123e4567-e89b-42d3-a456-426614174000", session_id: "native", generation: "123e4567-e89b-42d3-a456-426614174001", request_id: "123e4567-e89b-42d3-a456-426614174002" };
+  assert.equal(parseControlRequest({ ...base, action: "send", text: "é".repeat(32768) })?.action, "send");
+  assert.equal(parseControlRequest({ ...base, action: "send", text: "é".repeat(32769) }), undefined);
+  assert.equal(parseControlRequest({ ...base, action: "send", text: "\uD800" }), undefined);
+  assert.equal(parseControlRequest({ ...base, action: "send", text: "ok", extra: true }), undefined);
+  assert.equal(parseControlRequest({ ...base, action: "stop", text: "unexpected" }), undefined);
+});
+
+test("agent report attention is independent from native prompt observation", () => {
+  const status: SessionStatus = { protocol: 1, job_id: "job", owner: "owner", session_id: "native", generation: "generation", pid: 1, updated_at: 1, activity: "unknown" };
+  updateObservedActivity(status, "idle");
+  assert.equal(status.prompt, undefined, "idle is not an input request");
+  updateObservedActivity(status, "busy");
+  updateObservedPrompt(status, { kind: "custom", title: "Permission" });
+  assert.ok(updateAgentReport(status, "Build running", "Choose a strategy"));
+  updateObservedActivity(status, "idle");
+  updateObservedPrompt(status, undefined);
+  assert.equal(status.prompt, undefined, "native prompt end clears only native attention");
+  assert.equal(updateAgentReport(status, "Still running", undefined)?.attention, "Choose a strategy");
+  assert.equal(updateAgentReport(status, "Resolved", null)?.attention, undefined);
+  assert.equal(status.prompt, undefined);
+  assert.equal(updateAgentReport(status, "x".repeat(1025), null), undefined);
+});
+
+test("inherited job activation requires exact recorded pane PID", async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "coordinator-session-control-"));
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const uid = process.getuid?.();
+  assert.ok(typeof uid === "number");
+  const owner = `${Date.now().toString(16).padStart(8, "0").slice(-8)}${Math.random().toString(16).slice(2, 10)}`;
+  const jobs = join(root, "jobs");
+  const job = join(jobs, id);
+  const socketRoot = join(await realpath("/tmp"), `ac-${uid}-${owner}`);
+  const socketDir = join(socketRoot, id);
+  const previous = new Map(["AC_STATE_DIR", "AC_OWNER", "AC_JOB"].map((key) => [key, process.env[key]]));
+  try {
+    await Promise.all([jobs, socketRoot].map((path) => mkdir(path, { mode: 0o700 })));
+    await Promise.all([job, socketDir].map((path) => mkdir(path, { mode: 0o700 })));
+    await writeFile(join(root, "owner.json"), JSON.stringify({ schema: 1, token: owner }), { mode: 0o600 });
+    const bootId = "3e322019-1073-4f52-afd0-abed9a17ce70";
+    const identity = { boot_id: bootId, pid: process.pid, uid, start_sec: 1, start_usec: 0 };
+    const manifestPath = join(job, "manifest.json");
+    const manifest = { schema: 1, id, name: "test-job", owner, cwd: root, pi: "/bin/pi", tmux: "/bin/tmux", coordinator: "/bin/coordinator", created: new Date().toISOString(), boot_id: bootId, protocol: "1", socket: join(socketDir, "s") };
+    await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+    const launchPath = join(job, "launch.json");
+    await writeFile(launchPath, JSON.stringify({ schema: 1, phase: "exec-intent", server: { ...identity, pid: process.pid + 1 }, pane: identity }), { mode: 0o600 });
+    process.env.AC_STATE_DIR = root;
+    process.env.AC_OWNER = owner;
+    process.env.AC_JOB = id;
+    assert.equal(await verifyInheritedJob(), undefined, "legacy manifest without an explicit boot identity scheme must not activate");
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, boot_id_scheme: "darwin-boot-session-uuid" }));
+    assert.ok(await verifyInheritedJob(), "recorded pane process with the stable boot identity may activate");
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, boot_id_scheme: "unknown-scheme" }));
+    assert.equal(await verifyInheritedJob(), undefined, "unknown boot identity scheme must not activate");
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, boot_id_scheme: "darwin-boot-session-uuid", boot_id: "not-a-uuid" }));
+    assert.equal(await verifyInheritedJob(), undefined, "malformed stable boot identity must not activate");
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, boot_id_scheme: "darwin-boot-session-uuid" }));
+    await writeFile(launchPath, JSON.stringify({ schema: 1, phase: "exec-intent", server: { ...identity, pid: process.pid + 1 }, pane: { ...identity, pid: process.pid + 1 } }), { mode: 0o600 });
+    assert.equal(await verifyInheritedJob(), undefined, "descendant must not activate its parent's endpoint");
+  } finally {
+    for (const [key, value] of previous) value === undefined ? delete process.env[key] : process.env[key] = value;
+    await rm(root, { recursive: true, force: true });
+    await rm(socketRoot, { recursive: true, force: true });
+  }
+});
+
+test("stop refuses absent UI or an already-aborted call before CLI mutation", async () => {
+  const { tool } = register();
+  assert.ok(tool);
+  const request = { request: { action: "stop", id: "123e4567-e89b-42d3-a456-426614174000" } };
+  const noUi = await Reflect.apply(tool.execute, undefined, ["call", request, undefined, undefined, { cwd: tmpdir(), hasUI: false }]);
+  assert.equal(errorCode(noUi), "confirmation_unavailable");
+  const aborted = new AbortController();
+  aborted.abort();
+  const noMutation = await Reflect.apply(tool.execute, undefined, ["call", request, aborted.signal, undefined, { cwd: tmpdir(), hasUI: true }]);
+  assert.equal(errorCode(noMutation), "confirmation_unavailable");
+});
+
+test("stop denial and session replacement never reach the mutating CLI phase", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coordinator-stop-confirm-"));
+  const executable = join(directory, "agent-coordinator");
+  const capture = join(directory, "commands");
+  const previousPath = process.env.PATH;
+  const previousCapture = process.env.CONTROL_CAPTURE;
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const uid = process.getuid?.();
+  assert.ok(typeof uid === "number");
+  const target = { id, session_id: "123e4567-e89b-42d3-a456-426614174001", generation: "123e4567-e89b-42d3-a456-426614174002", pane: { boot_id: "boot", pid: 123, uid, start_sec: 1, start_usec: 0 } };
+  try {
+    await writeFile(executable, `#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);fs.appendFileSync(process.env.CONTROL_CAPTURE,JSON.stringify(args)+'\\n');if(args[0]==='_target')process.stdout.write(JSON.stringify(${JSON.stringify(target)}));\n`);
+    await chmod(executable, 0o700);
+    process.env.PATH = `${directory}${delimiter}${previousPath ?? ""}`;
+    process.env.CONTROL_CAPTURE = capture;
+    const { tool } = register();
+    assert.ok(tool);
+    const context = { cwd: directory, hasUI: true, sessionManager: { getSessionId: () => "initiator" }, ui: { confirm: async () => false } };
+    const denied = await Reflect.apply(tool.execute, undefined, ["call", { request: { action: "stop", id } }, undefined, undefined, context]);
+    assert.equal(errorCode(denied), "confirmation_cancelled");
+    assert.deepEqual(commandLog(await readFile(capture, "utf8")), [["_target", id, "--json"]]);
+
+    await writeFile(capture, "");
+    let sessionReads = 0;
+    const replacedContext = { ...context, sessionManager: { getSessionId: () => ++sessionReads === 1 ? "initiator" : "replaced" }, ui: { confirm: async () => true } };
+    const replaced = await Reflect.apply(tool.execute, undefined, ["call", { request: { action: "stop", id } }, undefined, undefined, replacedContext]);
+    assert.equal(errorCode(replaced), "confirmation_cancelled");
+    assert.deepEqual(commandLog(await readFile(capture, "utf8")), [["_target", id, "--json"]]);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousCapture === undefined) delete process.env.CONTROL_CAPTURE; else process.env.CONTROL_CAPTURE = previousCapture;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("uncertain send response is never automatically retried", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coordinator-send-uncertain-"));
+  const executable = join(directory, "agent-coordinator");
+  const capture = join(directory, "commands");
+  const previousPath = process.env.PATH;
+  const previousCapture = process.env.CONTROL_CAPTURE;
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const uid = process.getuid?.();
+  assert.ok(typeof uid === "number");
+  const target = { id, session_id: "123e4567-e89b-42d3-a456-426614174001", generation: "123e4567-e89b-42d3-a456-426614174002", pane: { boot_id: "boot", pid: 123, uid, start_sec: 1, start_usec: 0 } };
+  try {
+    await writeFile(executable, `#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);fs.appendFileSync(process.env.CONTROL_CAPTURE,JSON.stringify(args)+'\\n');if(args[0]==='_target')process.stdout.write(JSON.stringify(${JSON.stringify(target)}));else process.stdout.write('invalid');\n`);
+    await chmod(executable, 0o700);
+    process.env.PATH = `${directory}${delimiter}${previousPath ?? ""}`;
+    process.env.CONTROL_CAPTURE = capture;
+    const { tool } = register();
+    assert.ok(tool);
+    const result = await Reflect.apply(tool.execute, undefined, ["call", { request: { action: "send", id, text: "literal 世界", request_id: "123e4567-e89b-42d3-a456-426614174003" } }, undefined, undefined, { cwd: directory }]);
+    assert.equal(errorCode(result), "uncertain");
+    const commands = commandLog(await readFile(capture, "utf8"));
+    assert.equal(commands.filter((args) => args[0] === "send").length, 1);
+    assert.deepEqual(commands.map((args) => args[0]), ["_target", "send"]);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousCapture === undefined) delete process.env.CONTROL_CAPTURE; else process.env.CONTROL_CAPTURE = previousCapture;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("extension registers one strict coordinator request tool without spawning", () => {
   const { tool, registrations } = register();
@@ -25,14 +221,35 @@ test("extension registers one strict coordinator request tool without spawning",
   assert.equal(Value.Check(tool.parameters, { request: { action: "run" } }), false);
 });
 
+test("rich reads fall back only for old-CLI invalid_usage and never retry mutations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coordinator-legacy-read-"));
+  const executable = join(directory, "agent-coordinator");
+  const capture = join(directory, "commands");
+  const previousPath = process.env.PATH;
+  const previousCapture = process.env.CONTROL_CAPTURE;
+  try {
+    await writeFile(executable, `#!/usr/bin/env node\nconst fs=require('node:fs');const args=process.argv.slice(2);fs.appendFileSync(process.env.CONTROL_CAPTURE,JSON.stringify(args)+'\\n');if(args.includes('--session-info')){process.stdout.write(JSON.stringify({error:{code:'invalid_usage',message:'unknown flag',uncertain:false}}));process.exit(2)}process.stdout.write(JSON.stringify({jobs:[]}));\n`);
+    await chmod(executable, 0o700);
+    process.env.PATH = `${directory}${delimiter}${previousPath ?? ""}`;
+    process.env.CONTROL_CAPTURE = capture;
+    const { tool } = register();
+    await Reflect.apply(tool.execute, undefined, ["call", { request: { action: "list" } }, undefined, undefined, { cwd: directory }]);
+    assert.deepEqual(commandLog(await readFile(capture, "utf8")), [["list", "--session-info", "--json"], ["list", "--json"]]);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousCapture === undefined) delete process.env.CONTROL_CAPTURE; else process.env.CONTROL_CAPTURE = previousCapture;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("fixed action vectors keep malicious task text exclusively on stdin", () => {
   const task = "\uFEFFUnicode @mention\n</file>; touch /tmp/should-not-run";
   assert.deepEqual(cliArguments({ action: "start", name: "job-a", cwd: "work dir", task }, "/caller/project"), {
     argv: ["start", "job-a", "--cwd", resolve("/caller/project", "work dir"), "--task-file", "-", "--json"],
     cwd: "/caller/project", input: task,
   });
-  assert.deepEqual(cliArguments({ action: "list" }, "/caller"), { argv: ["list", "--json"], cwd: "/caller" });
-  assert.deepEqual(cliArguments({ action: "doctor", name: "job-a" }, "/caller"), { argv: ["doctor", "job-a", "--json"], cwd: "/caller" });
+  assert.deepEqual(cliArguments({ action: "list" }, "/caller"), { argv: ["list", "--session-info", "--json"], cwd: "/caller" });
+  assert.deepEqual(cliArguments({ action: "doctor", name: "job-a" }, "/caller"), { argv: ["doctor", "job-a", "--session-info", "--json"], cwd: "/caller" });
 });
 
 test("validates action response shapes and rejects malformed protocol", () => {

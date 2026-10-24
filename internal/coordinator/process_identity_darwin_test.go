@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,11 +16,18 @@ import (
 )
 
 func TestProcessIdentityOwnedProcesses(t *testing.T) {
+	kernelBoot, err := unix.Sysctl("kern.bootsessionuuid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := currentBoot(); err != nil || got != strings.ToLower(strings.TrimSpace(kernelBoot)) {
+		t.Fatalf("currentBoot() = %q, %v; kernel UUID = %q", got, err, kernelBoot)
+	}
 	current, err := identifyProcess(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.PID != os.Getpid() || current.UID != uint32(os.Getuid()) || current.BootID == "" || current.StartSec <= 0 {
+	if current.PID != os.Getpid() || current.UID != uint32(os.Getuid()) || !bootUUIDPattern.MatchString(current.BootID) || current.StartSec <= 0 {
 		t.Fatalf("invalid current identity: %+v", current)
 	}
 	status, err := compareProcess(current)
@@ -48,6 +56,18 @@ func TestProcessIdentityOwnedProcesses(t *testing.T) {
 	}
 }
 
+func TestCompareProcessLegacyClockDriftIsUnknown(t *testing.T) {
+	current, err := identifyProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.BootID = "1791325452.900746"
+	status, err := compareProcess(current)
+	if err != nil || status != ProcessUnknown {
+		t.Fatalf("legacy clock identity: status=%q err=%v, want unknown", status, err)
+	}
+}
+
 func TestCompareProcessMismatches(t *testing.T) {
 	current, err := identifyProcess(os.Getpid())
 	if err != nil {
@@ -56,17 +76,19 @@ func TestCompareProcessMismatches(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*ProcessIdentity)
+		want   ProcessStatus
 	}{
-		{"boot", func(p *ProcessIdentity) { p.BootID += "-other" }},
-		{"birth", func(p *ProcessIdentity) { p.StartUsec++ }},
-		{"uid", func(p *ProcessIdentity) { p.UID++ }},
+		{"different stable boot", func(p *ProcessIdentity) { p.BootID = "00000000-0000-0000-0000-000000000000" }, ProcessEnded},
+		{"malformed boot", func(p *ProcessIdentity) { p.BootID += "-other" }, ProcessUnknown},
+		{"birth", func(p *ProcessIdentity) { p.StartUsec++ }, ProcessEnded},
+		{"uid", func(p *ProcessIdentity) { p.UID++ }, ProcessEnded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorded := current
 			tc.mutate(&recorded)
 			status, err := compareProcess(recorded)
-			if err != nil || status != ProcessEnded {
-				t.Fatalf("status=%q err=%v", status, err)
+			if err != nil || status != tc.want {
+				t.Fatalf("status=%q err=%v, want %q", status, err, tc.want)
 			}
 		})
 	}

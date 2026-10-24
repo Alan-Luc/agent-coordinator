@@ -69,6 +69,9 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	if len(args) > 0 && (strings.HasPrefix(args[0], "_") || args[0] == "send" || args[0] == "stop" || args[0] == "force-stop") {
+		return runControl(ctx, c, args, in, out, errOut, fail, invalid)
+	}
 	if len(args) == 0 {
 		if err := tui.Run(ctx, c); err != nil {
 			return fail(err)
@@ -96,7 +99,7 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	wantsJSON := false
+	wantsJSON, sessionInfo := false, false
 	cwd, taskFile, id := "", "", ""
 	switch command {
 	case "start":
@@ -105,6 +108,7 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 		flags.BoolVar(&wantsJSON, "json", false, "JSON result")
 	case "list", "doctor":
 		flags.BoolVar(&wantsJSON, "json", false, "JSON result")
+		flags.BoolVar(&sessionInfo, "session-info", false, "include validated session details")
 	case "forget":
 		flags.StringVar(&id, "id", "", "immutable job UUID")
 	}
@@ -153,17 +157,26 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
+		facts.Session = nil
 		return emit(facts)
 	case "list":
 		facts, err := c.List(ctx)
 		if err != nil {
 			return fail(err)
 		}
+		if !sessionInfo {
+			for i := range facts.Jobs {
+				facts.Jobs[i].Session = nil
+			}
+		}
 		return emit(facts)
 	case "doctor":
 		facts, err := c.Doctor(ctx, name)
 		if err != nil {
 			return fail(err)
+		}
+		if !sessionInfo {
+			facts.Session = nil
 		}
 		return emit(facts)
 	case "enter", "observe":

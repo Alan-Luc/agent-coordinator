@@ -54,6 +54,13 @@ func checkPrivateServerCreateInspectRemove(t *testing.T) {
 	if snapshot.Owner != "owner" || snapshot.Job != "job123" || snapshot.Protocol != "1" || snapshot.Session != session || snapshot.PaneID == "" || snapshot.Width != 100 || snapshot.Height != 30 {
 		t.Fatalf("unexpected private session facts: %+v", snapshot)
 	}
+	if _, err := client.Capture(context.Background(), socket, snapshot.PaneID); err != nil {
+		t.Fatalf("read-only pane capture failed: %v", err)
+	}
+	afterCapture, err := client.Inspect(context.Background(), socket, session)
+	if err != nil || afterCapture.Width != snapshot.Width || afterCapture.Height != snapshot.Height {
+		t.Fatalf("capture changed pane geometry: before=%+v after=%+v err=%v", snapshot, afterCapture, err)
+	}
 	rootKeys, err := client.command(context.Background(), "-S", socket, "-N", "list-keys", "-T", "root")
 	if err != nil || strings.TrimSpace(string(rootKeys)) != "bind-key -T root F12 detach-client" {
 		t.Fatalf("unexpected root key bindings: %q, %v", rootKeys, err)
@@ -75,6 +82,34 @@ func checkPrivateServerCreateInspectRemove(t *testing.T) {
 	}
 	if _, err := client.Inspect(context.Background(), socket, session); err == nil {
 		t.Fatal("inspection succeeded after last session was removed")
+	}
+}
+
+func TestCaptureUsesPaneTargetWithoutChangingGeometry(t *testing.T) {
+	root := t.TempDir()
+	capture := filepath.Join(root, "argv")
+	fakeTmux := filepath.Join(root, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nprintf 'pane output\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: fakeTmux}
+	t.Setenv("CAPTURE", capture)
+	got, err := client.Capture(context.Background(), "/private/socket", "%7")
+	if err != nil || got != "pane output\n" {
+		t.Fatalf("Capture() = %q, %v", got, err)
+	}
+	argv, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(argv)) != "-S\n/private/socket\n-N\ncapture-pane\n-p\n-t\n%7" {
+		t.Fatalf("capture argv = %q", argv)
+	}
+}
+
+func TestCaptureRejectsEmptyTarget(t *testing.T) {
+	if _, err := (Client{}).Capture(context.Background(), "", "%1"); err == nil {
+		t.Fatal("Capture accepted an empty socket")
 	}
 }
 

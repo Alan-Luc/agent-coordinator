@@ -156,6 +156,9 @@ func (c *Coordinator) Forget(ctx context.Context, target string, byID bool) erro
 	if err != nil {
 		return actionError(1, "ownership_unknown", "job ownership could not be verified", true, id, target)
 	}
+	if hasLegacyProcessEvidence(m, l) {
+		return actionError(1, "legacy_identity", "claimed legacy work cannot be retired without a proven boot identity", true, id, m.Name)
+	}
 	removedTerminal := false
 	if l.Phase == "exec-intent" {
 		facts := c.facts(ctx, m, l)
@@ -210,6 +213,9 @@ func (c *Coordinator) Forget(ctx context.Context, target string, byID bool) erro
 	if err := removeTask(filepath.Join(c.store.root, "jobs", id)); err != nil {
 		return actionError(1, "retirement_failed", "task file could not be removed", true, id, m.Name)
 	}
+	if err := removeEndedControlEndpoint(ctx, m, l); err != nil {
+		return actionError(1, "cleanup_pending", "job retired; controller endpoint cleanup remains unverified", true, id, m.Name)
+	}
 	if removedTerminal {
 		if _, err := os.Lstat(m.Socket); err == nil {
 			if err := c.removeStaleSocket(ctx, m, l); err != nil {
@@ -220,6 +226,38 @@ func (c *Coordinator) Forget(ctx context.Context, target string, byID bool) erro
 		}
 	}
 	return nil
+}
+
+func removeEndedControlEndpoint(ctx context.Context, m Manifest, l Launch) error {
+	path := controlEndpoint(m.Socket)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if l.Pane == nil || !identityEnded(*l.Pane) {
+		return errors.New("controller process has not been proven ended")
+	}
+	before, err := checkSocketPath(path)
+	if err != nil {
+		return err
+	}
+	conn, err := (&net.Dialer{Timeout: 100 * time.Millisecond}).DialContext(ctx, "unix", path)
+	if err == nil {
+		_ = conn.Close()
+		return errors.New("controller endpoint still has a listener")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return errors.New("controller endpoint listener state is unknown")
+	}
+	after, err := checkSocketPath(path)
+	if err != nil || before.Dev != after.Dev || before.Ino != after.Ino {
+		return errors.New("controller endpoint changed before cleanup")
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 func (c *Coordinator) removeDeadSession(ctx context.Context, m Manifest, l *Launch, initial tmux.Snapshot) error {

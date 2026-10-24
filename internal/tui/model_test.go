@@ -106,10 +106,19 @@ func TestNamelessRowsCannotStartAttachOrObserve(t *testing.T) {
 func TestConfirmationIdentifiesLiteralNameAndUUID(t *testing.T) {
 	m := newModel(context.Background(), nil)
 	m.mode, m.confirm = confirmAction, forgetJob
-	m.jobs = []coordinator.JobFacts{{ID: "cached-uuid", Name: "worker\x1b"}}
+	m.jobs = []coordinator.JobFacts{{ID: "cached-uuid\x1b", Name: "worker\x1b"}}
 	view := m.View()
-	if !strings.Contains(view, "worker") || !strings.Contains(view, "cached-uuid") || strings.Contains(view, "\x1b") {
+	if !strings.Contains(view, "worker") || !strings.Contains(view, `cached-uuid\x1b`) || strings.Contains(view, "\x1b") {
 		t.Fatalf("confirmation does not safely identify exact row:\n%s", view)
+	}
+}
+
+func TestControlGenerationRendersUntrustedIdentifiersLiterally(t *testing.T) {
+	target := coordinator.SessionTarget{ID: "job", SessionID: "native\x1b", Generation: "runtime\x9b"}
+	m := model{mode: confirmControl, jobs: []coordinator.JobFacts{{ID: "job", Name: "worker"}}, controlTarget: &target, width: 100, height: 30}
+	view := m.View()
+	if strings.ContainsAny(view, "\x1b\x9b") || !strings.Contains(view, `native\x1b · runtime\x9b`) {
+		t.Fatalf("target identity was not rendered literally:\n%s", view)
 	}
 }
 
@@ -126,15 +135,15 @@ func TestRetiredRowsOnlyAllowForgetByUUID(t *testing.T) {
 	}
 }
 
-func TestRetiredRowCannotAttachAndDisplaysUUID(t *testing.T) {
+func TestRetiredRowCannotAttachAndKeepsDiagnosticsSecondary(t *testing.T) {
 	m := newModel(context.Background(), nil)
 	m.jobs = []coordinator.JobFacts{{ID: "old-uuid", Name: "worker", Retired: true}}
 	updated, command := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if updated.(model).busy || command != nil {
 		t.Fatal("retired row started an attach")
 	}
-	if !strings.Contains(m.View(), "old-uuid") || !strings.Contains(m.View(), "retired=true") {
-		t.Fatalf("row does not identify retired UUID:\n%s", m.View())
+	if !strings.Contains(m.View(), "retired") || strings.Contains(m.View(), "old-uuid") {
+		t.Fatalf("default row exposes diagnostics or hides retirement:\n%s", m.View())
 	}
 }
 

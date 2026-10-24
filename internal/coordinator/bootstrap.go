@@ -43,6 +43,9 @@ func RunBootstrap(ctx context.Context, id string) error {
 	if l.Phase != "preexec" || l.Retired {
 		return errors.New("launch attempt already claimed or revoked")
 	}
+	if m.BootIDScheme != BootIdentityScheme || !bootUUIDPattern.MatchString(m.BootID) {
+		return errors.New("legacy or unsupported boot identity cannot authorize bootstrap")
+	}
 	fail := func() error {
 		l.Phase = "failed"
 		l.Error = "bootstrap validation failed"

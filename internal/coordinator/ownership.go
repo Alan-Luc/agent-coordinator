@@ -13,7 +13,7 @@ import (
 func (c *Coordinator) ownedSnapshot(ctx context.Context, m Manifest) (tmux.Snapshot, error) {
 	var empty tmux.Snapshot
 	expected, err := c.store.socket(m.ID, false)
-	if err != nil || expected != m.Socket || m.Owner != c.store.token || m.Protocol != ProtocolVersion {
+	if err != nil || expected != m.Socket || m.Owner != c.store.token || m.Protocol != ProtocolVersion || m.BootIDScheme != BootIdentityScheme || !bootUUIDPattern.MatchString(m.BootID) {
 		return empty, errors.New("invalid resource identity")
 	}
 	for _, dir := range []string{filepath.Dir(filepath.Dir(m.Socket)), filepath.Dir(m.Socket)} {

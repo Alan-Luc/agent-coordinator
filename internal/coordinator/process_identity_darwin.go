@@ -5,17 +5,21 @@ package coordinator
 import (
 	"errors"
 	"fmt"
-	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
 func currentBoot() (string, error) {
-	boot, err := unix.SysctlTimeval("kern.boottime")
+	boot, err := unix.Sysctl("kern.bootsessionuuid")
 	if err != nil {
-		return "", fmt.Errorf("query kernel boot time: %w", err)
+		return "", fmt.Errorf("query kernel boot-session UUID: %w", err)
 	}
-	return strconv.FormatInt(boot.Sec, 10) + "." + strconv.FormatInt(int64(boot.Usec), 10), nil
+	boot = strings.ToLower(strings.TrimSpace(boot))
+	if !bootUUIDPattern.MatchString(boot) {
+		return "", errors.New("kernel boot-session UUID is malformed")
+	}
+	return boot, nil
 }
 
 func identifyProcess(pid int) (ProcessIdentity, error) {
@@ -47,6 +51,9 @@ func identifyProcess(pid int) (ProcessIdentity, error) {
 }
 
 func compareProcess(recorded ProcessIdentity) (ProcessStatus, error) {
+	if !bootUUIDPattern.MatchString(recorded.BootID) {
+		return ProcessUnknown, nil
+	}
 	bootID, err := currentBoot()
 	if err != nil {
 		return ProcessUnknown, err
