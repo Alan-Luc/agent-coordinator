@@ -137,12 +137,13 @@ func TestRetiredRowsOnlyAllowForgetByUUID(t *testing.T) {
 
 func TestRetiredRowCannotAttachAndKeepsDiagnosticsSecondary(t *testing.T) {
 	m := newModel(context.Background(), nil)
-	m.jobs = []coordinator.JobFacts{{ID: "old-uuid", Name: "worker", Retired: true}}
+	const id = "123e4567-e89b-42d3-a456-426614174000"
+	m.jobs = []coordinator.JobFacts{{ID: id, Name: "worker", Retired: true}}
 	updated, command := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if updated.(model).busy || command != nil {
 		t.Fatal("retired row started an attach")
 	}
-	if !strings.Contains(m.View(), "retired") || strings.Contains(m.View(), "old-uuid") {
+	if !strings.Contains(m.View(), "retired") || strings.Contains(m.View(), id) || !strings.Contains(m.View(), "123e4567") {
 		t.Fatalf("default row exposes diagnostics or hides retirement:\n%s", m.View())
 	}
 }

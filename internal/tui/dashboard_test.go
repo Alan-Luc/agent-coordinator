@@ -104,6 +104,57 @@ func TestSessionCardsColorProfilesKeepSemanticMarkers(t *testing.T) {
 	}
 }
 
+func TestObservePrioritizesReadOnlyIdentityAndAttention(t *testing.T) {
+	attention := "Please inspect layout"
+	job := coordinator.JobFacts{ID: "123e4567-e89b-42d3-a456-426614174000", Name: "planner", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "busy", Prompt: &coordinator.ObservedPrompt{Kind: "confirm", Title: "Review proposal?"}, Report: &coordinator.AgentReport{Summary: "Proposal ready", Attention: &attention}}}
+	for _, visible := range []bool{true, false} {
+		view := ansi.Strip(renderObserve(job, 80, 12, visible, "output-token", ""))
+		for _, required := range []string{"Observe · READ ONLY", "planner", "123e4567", "Process Live", "Activity busy", "[INPUT]", "Review proposal?", "[AGENT]", "Please inspect layout", "Agent report: Proposal ready", "coverage unknown"} {
+			if !strings.Contains(view, required) {
+				t.Errorf("Observe visible=%v lost %q:\n%s", visible, required, view)
+			}
+		}
+		if visible && (!strings.Contains(view, "Live output · current screen") || !strings.Contains(view, "output-token")) {
+			t.Errorf("capture not labeled/shown:\n%s", view)
+		}
+		if !visible && (strings.Contains(view, "output-token") || !strings.Contains(view, "Output hidden · o show")) {
+			t.Errorf("output toggle hid facts or exposed capture:\n%s", view)
+		}
+	}
+	short := renderObserve(job, 72, 4, true, "must yield to warnings", "")
+	for _, required := range []string{"[INPUT]", "[AGENT]", "coverage unknown"} {
+		if !strings.Contains(short, required) {
+			t.Errorf("short Observe lost priority %q:\n%s", required, short)
+		}
+	}
+}
+
+func TestObserveCompleteCompactRender(t *testing.T) {
+	job := coordinator.JobFacts{ID: "id", Name: "worker", Terminal: "live", Session: &coordinator.SessionStatus{Activity: "idle"}}
+	const expected = "Observe · READ ONLY · worker · id\nProcess Live · Activity idle\nNo observed input request · other coverage unknown\nLive output · current screen\nhello"
+	if got := ansi.Strip(renderObserve(job, 80, 8, true, "hello", "")); got != expected {
+		t.Fatalf("compact Observe:\n%s\nwant:\n%s", got, expected)
+	}
+}
+
+func TestObserveSanitizesAllTextBeforeStyling(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	defer lipgloss.SetColorProfile(previous)
+	lipgloss.SetColorProfile(termenv.ANSI)
+	malicious := "界e\u0301👩‍💻\x1b]52;c;payload\a\x1b[2J\r\x00\u0085\nSessions"
+	job := coordinator.JobFacts{ID: malicious, Name: malicious, Terminal: "live", Session: &coordinator.SessionStatus{Activity: malicious, Prompt: &coordinator.ObservedPrompt{Kind: malicious, Title: malicious}, Report: &coordinator.AgentReport{Summary: malicious, Attention: &malicious}}}
+	for _, width := range []int{30, 72, 120} {
+		view := renderObserve(job, width, 16, true, "safe output\\x1b", "")
+		plain := ansi.Strip(view)
+		if strings.ContainsAny(plain, "\x1b\a\r\x00\u0085") || strings.Contains(view, "\x1b]52") || strings.Contains(view, "\x1b[2J") {
+			t.Fatalf("executable payload in Observe: %q", view)
+		}
+		if strings.Contains(plain, "\nSessions") || lipgloss.Width(view) > width || lipgloss.Height(view) > 16 {
+			t.Fatalf("text escaped its cell/row boundary:\n%s", view)
+		}
+	}
+}
+
 func TestDashboardKeepsActionStatusInsideTheViewport(t *testing.T) {
 	for _, size := range []struct{ width, height int }{{80, 24}, {100, 30}, {30, 12}} {
 		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
@@ -253,16 +304,16 @@ func TestObserveDistinguishesNativePromptAgentReportAndUnknown(t *testing.T) {
 	}
 	job.Session.Report = &coordinator.AgentReport{Summary: "working", Attention: &attention}
 	both := renderObserve(job, 80, 12, false, "", "")
-	if !strings.Contains(both, "Needs your input") || !strings.Contains(both, "Agent reports attention") {
+	if !strings.Contains(both, "Needs your input") || !strings.Contains(both, "[AGENT] Agent requests:") {
 		t.Fatalf("native prompt and agent attention were not both shown:\n%s", both)
 	}
-	narrowBoth := renderNarrowObserve(job, 80, 4, "output", "")
-	if !strings.Contains(narrowBoth, "Needs input") || !strings.Contains(narrowBoth, "Agent attention") {
+	narrowBoth := renderObserve(job, 80, 4, true, "output", "")
+	if !strings.Contains(narrowBoth, "[INPUT] Needs your input") || !strings.Contains(narrowBoth, "[AGENT] Agent requests:") {
 		t.Fatalf("narrow layout hid simultaneous attention:\n%s", narrowBoth)
 	}
 	job.Session.Prompt = nil
 	report := renderObserve(job, 80, 12, false, "", "")
-	if !strings.Contains(report, "Agent reports attention") || strings.ContainsAny(report, "\x1b\a\x00") {
+	if !strings.Contains(report, "[AGENT] Agent requests:") || strings.ContainsAny(report, "\x1b\a\x00") {
 		t.Fatalf("agent report was conflated or not sanitized:\\n%s", report)
 	}
 	job.Session = nil

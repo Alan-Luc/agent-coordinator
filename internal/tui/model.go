@@ -737,18 +737,15 @@ func (m model) View() string {
 			rightPanel := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.AdaptiveColor{Light: "8", Dark: "7"}).Padding(0, 1).Width(rightWidth - 2).Height(panelHeight).Render(renderObserve(m.selectedJobValue(), rightWidth-4, panelHeight, m.observe, m.previewText, m.previewError))
 			view.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
 		} else if narrow {
-			available := max(bodyHeight-1, 0)
-			previewHeight := 0
-			if m.observe {
-				previewHeight = min(4, max(available-2, 0))
-			}
+			available := max(bodyHeight-2, 0)
+			previewHeight := min(4, max(available-2, 0))
 			listHeight := available - previewHeight
 			if listHeight > 0 {
 				view.WriteString(renderSessionCards(m.jobs, m.selected, m.width, listHeight, 1) + "\n")
 			}
 			fmt.Fprintf(&view, "Min 72×12 · Attention %d\n", attentionCount)
-			if m.observe && previewHeight > 0 {
-				view.WriteString(renderNarrowObserve(m.selectedJobValue(), m.width-2, previewHeight, m.previewText, m.previewError) + "\n")
+			if previewHeight > 0 {
+				view.WriteString(renderObserve(m.selectedJobValue(), m.width, previewHeight, m.observe, m.previewText, m.previewError))
 			}
 		} else {
 			available := max(bodyHeight-2, 0)
@@ -758,7 +755,7 @@ func (m model) View() string {
 			}
 			view.WriteString(renderSessionCards(m.jobs, m.selected, m.width, listHeight, 2) + "\n")
 			if m.observe {
-				view.WriteString(renderNarrowObserve(m.selectedJobValue(), m.width, available-listHeight, m.previewText, m.previewError))
+				view.WriteString(renderObserve(m.selectedJobValue(), m.width, available-listHeight, true, m.previewText, m.previewError))
 			} else {
 				view.WriteString(renderObserve(m.selectedJobValue(), m.width, available-listHeight, false, "", ""))
 			}
@@ -939,108 +936,81 @@ func sessionAttention(job coordinator.JobFacts) bool {
 }
 
 func renderObserve(job coordinator.JobFacts, width, height int, visible bool, preview, previewError string) string {
-	if width < 1 {
-		width = 1
-	}
-	if height < 1 {
-		height = 1
-	}
-	lines := []string{"Observe"}
-	if job.ID == "" && job.Name == "" {
-		lines = append(lines, "Select a session to inspect")
-	} else {
-		lines = append(lines, renderLiteralLine(job.Name), "")
-		if job.Session == nil {
-			lines = append(lines, "Attention unknown · open session to inspect")
-		} else {
-			session := job.Session
-			if session.Prompt != nil {
-				lines = append(lines, "Needs your input · native "+renderLiteralLine(session.Prompt.Kind))
-				if session.Prompt.Title != "" {
-					lines = append(lines, renderLiteralLine(session.Prompt.Title))
-				}
-			}
-			if session.Report != nil && session.Report.Attention != nil && *session.Report.Attention != "" {
-				lines = append(lines, "Agent reports attention: "+renderLiteralLine(*session.Report.Attention))
-			}
-			if session.Prompt == nil {
-				hasReportAttention := session.Report != nil && session.Report.Attention != nil && *session.Report.Attention != ""
-				if session.Activity == "unknown" {
-					lines = append(lines, "Attention unknown · open session to inspect")
-				} else if hasReportAttention {
-					lines = append(lines, "Other prompt coverage unknown")
-				} else {
-					lines = append(lines, "No observed input request · other coverage unknown")
-				}
-			}
-			lines = append(lines, "Activity: "+renderLiteralLine(session.Activity))
-			if session.Report != nil && session.Report.Summary != "" {
-				lines = append(lines, "Agent report: "+renderLiteralLine(session.Report.Summary))
-			}
-		}
-		lines = append(lines, "", "Process: "+renderLiteralLine(lifecycle(job)))
-		if visible {
-			lines = append(lines, "", "Live output")
-			if previewError != "" {
-				lines = append(lines, renderLiteralLine(previewError))
-			} else if preview == "" {
-				lines = append(lines, "Waiting for first capture…")
-			} else {
-				lines = append(lines, strings.Split(renderPreview(preview, width), "\n")...)
-			}
-		} else {
-			lines = append(lines, "", "Press o to show preview")
-		}
-		if job.PiReadiness != "" || job.TaskOutcome != "" {
-			lines = append(lines, "", "Diagnostics · readiness: "+renderLiteralLine(job.PiReadiness)+" · outcome: "+renderLiteralLine(job.TaskOutcome))
-		}
-	}
-	for index := range lines {
-		lines[index] = runewidth.Truncate(lines[index], width, "…")
-	}
-	if len(lines) > height {
-		lines = lines[:height]
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderNarrowObserve(job coordinator.JobFacts, width, height int, preview, previewError string) string {
 	width, height = max(width, 1), max(height, 1)
-	lines := []string{"Observe · " + renderLiteralLine(job.Name)}
-	if job.Session == nil {
-		lines = append(lines, "Attention unknown · open session")
-	} else {
+	title := "Observe · READ ONLY"
+	if job.ID == "" && job.Name == "" {
+		return clipView(title+"\nSelect a session · n new", width, height)
+	}
+	id := ansi.Truncate(renderLiteralLine(job.ID), 8, "")
+	identity := renderLiteralLine(job.Name) + " · " + id
+	lines := []string{title, identity}
+	if height < 10 {
+		lines = []string{title + " · " + identity}
+	}
+	var attention []string
+	coverage := "Other prompt coverage unknown"
+	if job.Session != nil {
 		session := job.Session
 		if session.Prompt != nil {
-			lines = append(lines, "Needs input · "+renderLiteralLine(session.Prompt.Kind))
+			attention = append(attention, "[INPUT] Needs your input · native "+renderLiteralLine(session.Prompt.Kind)+" · "+renderLiteralLine(session.Prompt.Title))
 		}
 		if session.Report != nil && session.Report.Attention != nil && *session.Report.Attention != "" {
-			lines = append(lines, "Agent attention · "+renderLiteralLine(*session.Report.Attention))
+			attention = append(attention, "[AGENT] Agent requests: "+renderLiteralLine(*session.Report.Attention))
 		}
-		if session.Prompt == nil {
-			if session.Activity == "unknown" {
-				lines = append(lines, "Attention unknown · open session")
-			} else if session.Report != nil && session.Report.Attention != nil && *session.Report.Attention != "" {
-				lines = append(lines, "Other coverage unknown")
-			} else {
-				lines = append(lines, "No request · other coverage unknown")
+		if session.Prompt == nil && !sessionAttention(job) {
+			coverage = "No observed input request · other coverage unknown"
+		}
+	}
+	if job.Session == nil || job.Session.Activity == "unknown" {
+		coverage = "[?] Attention unknown · Enter inspect"
+	}
+	outputRows := 1
+	if visible {
+		outputRows = 2
+	}
+	if len(lines)+len(attention)+1+outputRows < height {
+		lines = append(lines, "Process "+lifecycle(job)+" · Activity "+activity(job))
+	}
+	lines = append(lines, attention...)
+	lines = append(lines, coverage)
+	if job.Session != nil && job.Session.Report != nil && job.Session.Report.Summary != "" && len(lines)+outputRows < height {
+		lines = append(lines, "Agent report: "+firstReportLine(job.Session.Report.Summary))
+	}
+	if visible {
+		if len(lines)+2 <= height {
+			lines = append(lines, "Live output · current screen")
+		}
+		if len(lines) < height {
+			switch {
+			case previewError != "":
+				lines = append(lines, renderLiteralLine(previewError)+" · Enter inspect")
+			case preview == "":
+				lines = append(lines, "Waiting for first capture…")
+			default:
+				output := strings.Split(renderPreview(preview, width), "\n")
+				if height <= 4 {
+					output[0] = "Output · " + output[0]
+				}
+				lines = append(lines, output...)
 			}
 		}
-	}
-	if previewError != "" {
-		lines = append(lines, renderLiteralLine(previewError))
-	} else if preview == "" {
-		lines = append(lines, "Output · waiting for capture")
 	} else {
-		output := strings.Split(renderPreview(preview, width), "\n")
-		output[0] = "Output · " + output[0]
-		lines = append(lines, output...)
-	}
-	for index := range lines {
-		lines[index] = runewidth.Truncate(lines[index], width, "…")
+		lines = append(lines, "Output hidden · o show")
 	}
 	if len(lines) > height {
 		lines = lines[:height]
+	}
+	for index, line := range lines {
+		if (strings.HasPrefix(line, "[INPUT]") || strings.HasPrefix(line, "[AGENT]")) && ansi.StringWidth(line) > width && width >= 24 {
+			line = ansi.Truncate(line, width-14, "…") + " Enter inspect"
+		}
+		line = ansi.Truncate(line, width, "…")
+		if index == 0 {
+			line = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true).Render(line)
+		} else if strings.HasPrefix(line, "[INPUT]") || strings.HasPrefix(line, "[AGENT]") {
+			line = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(line)
+		}
+		lines[index] = line
 	}
 	return strings.Join(lines, "\n")
 }
