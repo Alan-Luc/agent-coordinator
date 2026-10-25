@@ -97,6 +97,17 @@ func launchEnvironment(root, owner, id string) []string {
 	return append(env, "AC_STATE_DIR="+root, "AC_OWNER="+owner, "AC_JOB="+id)
 }
 func (c *Coordinator) Start(ctx context.Context, name, cwd string, task []byte) (JobFacts, error) {
+	return c.start(ctx, name, cwd, task, nil)
+}
+
+func (c *Coordinator) startManaged(ctx context.Context, name, cwd string, task []byte, expected CommunicationManager) (JobFacts, error) {
+	if !idPattern.MatchString(expected.ID) || expected.Lease == nil {
+		return JobFacts{}, actionError(2, "invalid_manager", "managed start requires an enrolled manager", false, "", name)
+	}
+	return c.start(ctx, name, cwd, task, &expected)
+}
+
+func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, expected *CommunicationManager) (JobFacts, error) {
 	if validateName(name) != nil || validateTask(task) != nil {
 		return JobFacts{}, actionError(2, "invalid_input", "invalid name or task: nonblank UTF-8 task <=1 MiB required", false, "", name)
 	}
@@ -151,6 +162,35 @@ func (c *Coordinator) Start(ctx context.Context, name, cwd string, task []byte) 
 		m, l, loadErr := c.store.load(id)
 		if m.Name == name && (!l.Retired || loadErr != nil || hasLegacyProcessEvidence(m, l)) {
 			return JobFacts{}, actionError(3, "duplicate_name", "name is already reserved; inspect list or doctor", false, id, name)
+		}
+	}
+	var communication communicationState
+	if expected != nil {
+		if expected.Lease == nil {
+			return JobFacts{}, actionError(2, "invalid_manager", "managed start requires an active manager lease", false, "", name)
+		}
+		var stateErr error
+		communication, stateErr = c.communicationLoad()
+		if stateErr != nil {
+			return JobFacts{}, stateErr
+		}
+		currentParent, parentErr := identifyProcess(expected.Lease.Process.PID)
+		parentMatches := parentErr == nil && sameIdentity(currentParent, expected.Lease.Process)
+		managerFound := false
+		for _, manager := range communication.Managers {
+			if parentMatches && manager.ID == expected.ID && manager.SessionFile == expected.SessionFile && manager.SessionID == expected.SessionID && manager.Enabled && manager.Lease != nil && manager.Lease.Generation == expected.Lease.Generation && sameIdentity(manager.Lease.Process, expected.Lease.Process) {
+				managerFound = true
+			}
+		}
+		if !managerFound {
+			return JobFacts{}, actionError(1, "manager_unavailable", "manager is not enabled", false, "", name)
+		}
+		if len(communication.Bindings) >= 128 {
+			communication.Degraded = true
+			if err := c.communicationSave(communication); err != nil {
+				return JobFacts{}, err
+			}
+			return JobFacts{}, actionError(1, "queue_full", "binding capacity is full; job was not dispatched", false, "", name)
 		}
 	}
 	id, err := newID()
@@ -210,6 +250,12 @@ func (c *Coordinator) Start(ctx context.Context, name, cwd string, task []byte) 
 	}
 	if err := syncDir(filepath.Dir(job)); err != nil {
 		return JobFacts{}, actionError(75, "uncertain_publication", "job publication uncertain; inspect list/doctor, do not retry", true, id, name)
+	}
+	if expected != nil {
+		communication.Bindings = append(communication.Bindings, CommunicationBinding{JobID: id, ManagerID: expected.ID})
+		if err := c.communicationSave(communication); err != nil {
+			return JobFacts{}, actionError(75, "binding_uncertain", "job binding could not be durably saved; do not launch", true, id, name)
+		}
 	}
 	unlock()
 	locked = false

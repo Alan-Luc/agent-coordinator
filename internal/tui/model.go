@@ -47,6 +47,8 @@ type resultMsg struct {
 	job        coordinator.JobFacts
 	err        error
 	generation uint64
+	inbox      *coordinator.CommunicationDiagnostics
+	inboxErr   error
 }
 type attachMsg struct {
 	cmd *exec.Cmd
@@ -112,6 +114,8 @@ type model struct {
 	previewJobID   string
 	previewGen     uint64
 	viewGeneration uint64
+	communication  coordinator.CommunicationDiagnostics
+	inboxError     bool
 }
 
 func newModel(ctx context.Context, c *coordinator.Coordinator) model {
@@ -134,7 +138,8 @@ func (m model) beginRefresh() (model, tea.Cmd) {
 func (m model) loadGeneration(generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		result, err := m.coordinator.List(m.ctx)
-		return resultMsg{operation: loadJobs, jobs: result.Jobs, err: err, generation: generation}
+		inbox, inboxErr := m.coordinator.CommunicationMessages(m.ctx, 0)
+		return resultMsg{operation: loadJobs, jobs: result.Jobs, err: err, generation: generation, inbox: &inbox, inboxErr: inboxErr}
 	}
 }
 
@@ -227,6 +232,10 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.loading = false
+			m.inboxError = message.inboxErr != nil
+			if message.inbox != nil && message.inboxErr == nil {
+				m.communication = *message.inbox
+			}
 		}
 		if message.operation != loadJobs {
 			m.busy = false
@@ -937,6 +946,14 @@ func draftExcerpt(escaped string, width, height int) string {
 
 func (m model) renderFooter(narrow bool) string {
 	var lines []string
+	if m.communication.Pending > 0 || m.communication.Escalated > 0 {
+		lines = append(lines, fmt.Sprintf("Outstanding %d · escalated %d", m.communication.Pending, m.communication.Escalated))
+	}
+	if m.inboxError {
+		lines = append(lines, "Communication unavailable")
+	} else if m.communication.Degraded {
+		lines = append(lines, "Communication degraded")
+	}
 	if m.message != "" {
 		lines = append(lines, "Action status", clipView(renderLiteralText(m.message), m.width, 3))
 	}

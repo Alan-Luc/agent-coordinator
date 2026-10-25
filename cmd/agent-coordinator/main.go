@@ -44,6 +44,17 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 	invalid := func(message string) int {
 		return fail(&coordinator.ActionError{ExitCode: 2, Diagnostic: coordinator.Diagnostic{Code: "invalid_usage", Message: message}})
 	}
+	var communicationBody []byte
+	if len(args) > 0 && args[0] == "_communication" {
+		body, readErr := io.ReadAll(io.LimitReader(in, coordinator.MaxCommunicationRequestBytes+1))
+		if readErr != nil || len(body) > coordinator.MaxCommunicationRequestBytes {
+			return invalid("communication request exceeds size limit")
+		}
+		communicationBody = body
+		if isCapabilityRequest(body) {
+			return runCommunicationBody(ctx, nil, args, body, out, fail, invalid)
+		}
+	}
 	if len(args) > 0 && args[0] == "_run" {
 		if len(args) != 2 {
 			return 2
@@ -69,6 +80,9 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	if len(args) > 0 && args[0] == "_communication" {
+		return runCommunicationBody(ctx, c, args, communicationBody, out, fail, invalid)
+	}
 	if len(args) > 0 && (strings.HasPrefix(args[0], "_") || args[0] == "send" || args[0] == "stop" || args[0] == "force-stop") {
 		return runControl(ctx, c, args, in, out, errOut, fail, invalid)
 	}
@@ -80,6 +94,9 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 	}
 	command := args[0]
 	rest := args[1:]
+	if command == "messages" {
+		return runMessages(ctx, c, rest, out, fail, invalid)
+	}
 	name := ""
 	switch command {
 	case "start", "doctor", "enter", "observe", "continue", "repair-socket":
@@ -95,7 +112,7 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 		}
 	case "list":
 	default:
-		return invalid("usage: agent-coordinator [start|list|doctor|enter|observe|continue|repair-socket|forget]")
+		return invalid("usage: agent-coordinator [start|list|messages|doctor|enter|observe|continue|repair-socket|forget]")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)

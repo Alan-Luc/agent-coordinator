@@ -150,6 +150,77 @@ the target, never automatically retry. Pending controls are fenced to the native
 session/runtime generation, not merely a reusable name. Tool arguments are
 recorded in Pi's transcript; this is **not** a secret-input channel.
 
+## Manager communication
+
+In an interactive Pi with a persisted conversation, opt in explicitly:
+
+```text
+/coordinator manage on
+/coordinator adopt WORKER-UUID
+/coordinator release WORKER-UUID
+/coordinator manage off
+```
+
+Jobs started by an enabled manager are associated before launch. Adoption requires
+confirmation of the exact existing worker; it never takes over another manager's
+assignment. Release refuses outstanding requests. Model-requested `manage`
+(`enabled`) and `adopt` (`id`) require native human confirmation. New, forked and
+cloned conversations do not inherit enrollment. Turning management off pauses
+delivery without stopping workers or deleting requests.
+
+A verified assigned worker uses `publish` (`message_id`, `kind`, `text`) for a
+`question`, `blocker` or reported `result`. Caller and manager identity come from
+the adapter, not model arguments. Unassigned workers receive an error, not a claim
+that Alan was notified. Routine progress continues to use `report` and does not
+wake the manager model. Their sanitized summaries appear in a bounded,
+unverified worker-report widget.
+
+The open manager checks its inbox every two seconds. New publications are batched
+into attributed follow-up notices: idle Pi starts a turn; busy Pi queues behind
+its current work. Worker text is **not Alan's instruction or permission**. The
+manager reads `inbox` (optional `cursor`), then explicitly `ack`s `message_ids`.
+`escalate` (`message_id`, `note`) surfaces a persistent human-attention request.
+`reply` (`message_id`, `request_id`, `text`) sends correlated plain text to the
+saved originating runtime. `resolve` (`message_id`, `note`) explicitly closes a
+request; its originating worker can also resolve it. Delivery, acknowledgement,
+reply and resolution are separate. Replies cannot answer native consent dialogs:
+enter that worker session when actual native interaction is needed.
+
+Persistence means the backend saved the publication, not that a model read it.
+Notice attempts are saved before the void native API call; they are not delivery
+receipts. Unacknowledged notices may appear again after reconnect. Exactly-once
+model execution is not promised. A duplicate retained publication ID with the
+same payload is idempotent; conflicting content is refused. Reply claims are saved
+before dispatch: an incomplete claim is uncertain and is never automatically
+redispatched. Definite rejections are retained separately and replay the same error,
+not another send. Explicit resolution can close a request despite an uncertain
+historical reply; replay protection lasts while that message is retained.
+A stale worker generation refuses reply without clearing the
+request or retargeting another runtime. Inspect before making a fresh explicit
+send. Worker reports/results never prove successful work.
+
+Workers continue if the manager closes. Pending/escalated counts remain visible
+in the manager and dashboard, including requests from ended jobs. Reopen the same
+conversation to reconnect; a competing live or unprovable runtime lease refuses
+ownership. Acknowledged unresolved requests remain outstanding without repeated
+model wake-ups. Native prompt observation is partial and may miss brief dialogs;
+stale, startup and unsupported observation is unknown. There is no always-on
+service or desktop-notification delivery while Pi is closed.
+
+Read-only diagnostics: `agent-coordinator messages --json` (page with `--cursor`).
+Communication uses a separate private versioned `communication/state.json`;
+unknown schemas fail closed. Limits are 4 KiB UTF-8 publication text, 16 unresolved
+requests per worker, 64 per manager, 16 managers, 128 bindings/messages and a
+1 MiB encoded document. Admission reserves delivery metadata space; lifecycle
+writes retain the hard document bound and can evict eligible records to drain
+accepted requests. Managed starts retain the public 1 MiB task limit, including
+when JSON escaping makes their internal request larger. Unresolved requests and unacknowledged results are never
+evicted to accept new work. Resolved messages and acknowledged results are kept
+at most seven days and may be evicted sooner under pressure. Full queues and
+persistence failures are explicit; `forget` cannot silently remove outstanding
+requests. This is a small local queue, not a secret-input channel or fleet system.
+Optional terminal-notifier is not required or installed by this package.
+
 ## State, privacy and limits
 
 State uses `AC_STATE_DIR`, otherwise `$XDG_STATE_HOME/agent-coordinator`, otherwise

@@ -6,8 +6,10 @@ import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import type { Static } from "typebox";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { maxControlTextBytes, sessionStatusSchema as sessionSchema, controlReceiptSchema as receiptSchema, sessionTargetSchema as targetSchema, stopAuthorizationSchema as authorizationSchema, type SessionTarget, type StopAuthorization } from "./control-protocol.ts";
+import { maxControlTextBytes, jobFactsSchema as jobSchema, sessionStatusSchema as sessionSchema, controlReceiptSchema as receiptSchema, sessionTargetSchema as targetSchema, stopAuthorizationSchema as authorizationSchema, type SessionTarget, type StopAuthorization } from "./control-protocol.ts";
 import { registerSessionControl, type SessionController } from "./session-control.ts";
+import { registerManager } from "./manager.ts";
+import { communicationErrorSchema as errorSchema, communicationToolRequests, communicationResultSchemas, communicationToolRequestSchema, type CommunicationAdapter, type CommunicationResult, type CommunicationError } from "./communication-protocol.ts";
 
 const taskLimit = 1 << 20;
 const outputLimit = 1 << 20;
@@ -22,18 +24,13 @@ const requestSchema = Type.Object({
     Type.Object({ action: Type.Literal("report"), summary: Type.String(), attention: Type.Optional(Type.Union([Type.String(), Type.Null()])) }, { additionalProperties: false }),
     Type.Object({ action: Type.Literal("stop"), id: Type.String() }, { additionalProperties: false }),
     Type.Object({ action: Type.Literal("force_stop"), id: Type.String() }, { additionalProperties: false }),
+    ...communicationToolRequests,
   ]),
 }, { additionalProperties: false });
 
-const jobSchema = Type.Object({
-  id: Type.String(), name: Type.String(), launch: Type.String(), terminal: Type.String(),
-  pi_readiness: Type.Literal("unverified"), task_outcome: Type.Literal("unknown"), clients: Type.Integer({ minimum: 0 }),
-  retired: Type.Boolean(), next_action: Type.String(), exit_status: Type.Optional(Type.Integer()), session: Type.Optional(sessionSchema),
-}, { additionalProperties: false });
 const listSchema = Type.Object({ jobs: Type.Array(jobSchema) }, { additionalProperties: false });
-const errorSchema = Type.Object({ error: Type.Object({ code: Type.String(), message: Type.String(), id: Type.Optional(Type.String()), name: Type.Optional(Type.String()), uncertain: Type.Boolean() }, { additionalProperties: false }) }, { additionalProperties: false });
 const reportedSchema = Type.Object({ reported: sessionSchema }, { additionalProperties: false });
-const resultSchema = Type.Union([jobSchema, listSchema, errorSchema, receiptSchema, reportedSchema]);
+const resultSchema = Type.Union([jobSchema, listSchema, errorSchema, receiptSchema, reportedSchema, ...communicationResultSchemas]);
 
 type Request = Static<typeof requestSchema>["request"];
 type ExistingRequest = Extract<Request, { action: "start" | "list" | "doctor" }>;
@@ -166,9 +163,8 @@ export function parseResult(stdout: string, action: ExistingRequest["action"]): 
   return parsed;
 }
 
-function asJson(value: Result): string { return JSON.stringify(value); }
-function toolOutput(result: Result, isError = false) {
-  return { content: [{ type: "text" as const, text: asJson(result) }], details: result, structuredContent: result, ...(isError ? { isError: true } : {}) };
+function toolOutput(result: Result | CommunicationResult | CommunicationError, isError = false) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result, structuredContent: result, ...(isError ? { isError: true } : {}) };
 }
 function errorResult(code: string, message: string, uncertain = false, id?: string): Static<typeof errorSchema> {
   return { error: { code, message, ...(id ? { id } : {}), uncertain } };
@@ -194,7 +190,7 @@ function isErrorResult(value: SessionTarget | Static<typeof errorSchema>): value
 function sameTarget(left: SessionTarget, right: SessionTarget): boolean {
   return left.id === right.id && left.session_id === right.session_id && left.generation === right.generation && left.pane.pid === right.pane.pid && left.pane.uid === right.pane.uid && left.pane.boot_id === right.pane.boot_id && left.pane.start_sec === right.pane.start_sec && left.pane.start_usec === right.pane.start_usec;
 }
-async function executeControl(request: Exclude<Request, ExistingRequest>, signal: AbortSignal | undefined, ctx: ExtensionContext, controller: SessionController | undefined): Promise<ReturnType<typeof toolOutput>> {
+async function executeControl(request: Extract<Request, { action: "send" | "report" | "stop" | "force_stop" }>, signal: AbortSignal | undefined, ctx: ExtensionContext, controller: SessionController | undefined): Promise<ReturnType<typeof toolOutput>> {
   if (request.action === "report") {
     const reported = await controller?.report(request.summary, request.attention);
     if (!reported) return toolOutput(errorResult("session_unavailable", "verified calling session is unavailable"), true);
@@ -256,7 +252,7 @@ async function executeControl(request: Exclude<Request, ExistingRequest>, signal
   }
 }
 
-function createCoordinatorTool(controller?: SessionController) {
+function createCoordinatorTool(controller?: SessionController, manager?: CommunicationAdapter) {
   return defineTool({
   name: "coordinator",
   label: "Coordinator",
@@ -268,11 +264,16 @@ function createCoordinatorTool(controller?: SessionController) {
     const request: Request = params.request;
     if (request.action === "start" && Buffer.byteLength(request.task, "utf8") > taskLimit) return toolOutput(errorResult("invalid_task", "Task text exceeds the 1 MiB coordinator limit."), true);
     if (request.action === "send" || request.action === "report" || request.action === "stop" || request.action === "force_stop") return executeControl(request, signal, ctx, controller);
+    if (Value.Check(communicationToolRequestSchema, request)) {
+      const result = manager ? await manager.execute(request, signal, ctx) : errorResult("session_unavailable", "communication requires an active verified adapter");
+      return toolOutput(result, "error" in result);
+    }
     let cliSpawned = false;
     try {
       const executable = await findExecutable();
       const invocation = cliArguments(request, ctx.cwd);
-      let outcome = await runCli(executable, invocation.argv, invocation.cwd, invocation.input, signal);
+      const managedStart = request.action === "start" && manager ? await manager.start(request, signal, ctx) : { managed: false as const };
+      let outcome = managedStart.managed ? { code: managedStart.code, stdout: managedStart.stdout } : await runCli(executable, invocation.argv, invocation.cwd, invocation.input, signal);
       cliSpawned = true;
       if ((request.action === "list" || request.action === "doctor") && outcome.code === 2) {
         let legacyFallback = false;
@@ -305,11 +306,12 @@ function createCoordinatorTool(controller?: SessionController) {
 
 export const coordinatorTool = createCoordinatorTool();
 
-export function registerCoordinator(pi: Pick<ExtensionAPI, "registerTool">, controller?: SessionController): void {
-  pi.registerTool(controller ? createCoordinatorTool(controller) : coordinatorTool);
+export function registerCoordinator(pi: Pick<ExtensionAPI, "registerTool">, controller?: SessionController, manager?: CommunicationAdapter): void {
+  pi.registerTool(controller || manager ? createCoordinatorTool(controller, manager) : coordinatorTool);
 }
 
 export default function (pi: ExtensionAPI): void {
   const controller = registerSessionControl(pi);
-  registerCoordinator(pi, controller);
+  const manager = registerManager(pi, controller, { findExecutable, runCli });
+  registerCoordinator(pi, controller, manager);
 }

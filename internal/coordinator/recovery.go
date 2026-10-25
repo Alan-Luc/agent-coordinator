@@ -156,6 +156,20 @@ func (c *Coordinator) Forget(ctx context.Context, target string, byID bool) erro
 	if err != nil {
 		return actionError(1, "ownership_unknown", "job ownership could not be verified", true, id, target)
 	}
+	communication, communicationErr := c.communicationLoad()
+	if communicationErr != nil {
+		return actionError(1, "communication_unknown", "communication ownership could not be verified; Forget refused", true, id, m.Name)
+	}
+	for _, binding := range communication.Bindings {
+		if binding.JobID == id {
+			return actionError(1, "communication_assigned", "release the worker from its manager before Forget", false, id, m.Name)
+		}
+	}
+	for _, message := range communication.Messages {
+		if message.Source.ID == id && communicationMessageBlocksForget(message) {
+			return actionError(1, "communication_pending", "pending or uncertain communication prevents Forget", false, id, m.Name)
+		}
+	}
 	if hasLegacyProcessEvidence(m, l) {
 		return actionError(1, "legacy_identity", "claimed legacy work cannot be retired without a proven boot identity", true, id, m.Name)
 	}

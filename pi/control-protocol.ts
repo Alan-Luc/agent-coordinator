@@ -12,6 +12,11 @@ export const sessionStatusSchema = Type.Object({
   protocol: Type.Literal(controlProtocol), job_id: Type.String(), owner: Type.String(), session_id: Type.String(), generation: Type.String(), pid: Type.Integer(), updated_at: Type.Integer(),
   activity: Type.Union([Type.Literal("unknown"), Type.Literal("idle"), Type.Literal("busy")]), prompt: Type.Optional(observedPromptSchema), report: Type.Optional(agentReportSchema),
 }, { additionalProperties: false });
+export const jobFactsSchema = Type.Object({
+  id: Type.String(), name: Type.String(), launch: Type.String(), terminal: Type.String(),
+  pi_readiness: Type.Literal("unverified"), task_outcome: Type.Literal("unknown"), clients: Type.Integer({ minimum: 0 }),
+  retired: Type.Boolean(), next_action: Type.String(), exit_status: Type.Optional(Type.Integer()), session: Type.Optional(sessionStatusSchema),
+}, { additionalProperties: false });
 export const controlRequestSchema = Type.Union([
   Type.Object({ protocol: Type.Literal(controlProtocol), job_id: Type.String(), session_id: Type.String(), generation: Type.String(), request_id: Type.String(), action: Type.Literal("send"), text: Type.String() }, { additionalProperties: false }),
   Type.Object({ protocol: Type.Literal(controlProtocol), job_id: Type.String(), session_id: Type.String(), generation: Type.String(), request_id: Type.String(), action: Type.Literal("stop") }, { additionalProperties: false }),
