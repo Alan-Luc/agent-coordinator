@@ -11,15 +11,15 @@ const cursor = Type.Optional(Type.Integer({ minimum: 0 }));
 const ids = Type.Array(id, { minItems: 1, maxItems: 8, uniqueItems: true });
 const kind = Type.Union([Type.Literal("question"), Type.Literal("blocker"), Type.Literal("result")]);
 export const communicationToolRequests = [
-  Type.Object({ action: Type.Literal("manage"), enabled: Type.Boolean() }, strict),
-  Type.Object({ action: Type.Literal("adopt"), id }, strict),
-  Type.Object({ action: Type.Literal("release"), id }, strict),
-  Type.Object({ action: Type.Literal("publish"), message_id: id, kind, text: Type.String() }, strict),
-  Type.Object({ action: Type.Literal("inbox"), cursor }, strict),
-  Type.Object({ action: Type.Literal("ack"), message_ids: ids }, strict),
-  Type.Object({ action: Type.Literal("escalate"), message_id: id, note: Type.String() }, strict),
-  Type.Object({ action: Type.Literal("reply"), message_id: id, request_id: id, text: Type.String() }, strict),
-  Type.Object({ action: Type.Literal("resolve"), message_id: id, note: Type.String() }, strict),
+  Type.Object({ action: Type.Literal("manage"), enabled: Type.Boolean() }, { ...strict, description: "Enable or pause this persisted interactive manager conversation. Requires native human confirmation; pausing preserves workers and pending messages." }),
+  Type.Object({ action: Type.Literal("adopt"), id }, { ...strict, description: "Associate an existing worker UUID after native confirmation of its exact runtime. Cannot take over another manager's assignment." }),
+  Type.Object({ action: Type.Literal("release"), id }, { ...strict, description: "Remove this manager's worker association without stopping it. Refuses unresolved questions or blockers." }),
+  Type.Object({ action: Type.Literal("publish"), message_id: id, kind, text: Type.String() }, { ...strict, description: "Assigned worker publishes a durable question, blocker or reported result; not routine progress. Use a fresh UUID per logical message and at most 4 KiB UTF-8 text. Source and manager are derived from verified identity. Retained identical IDs/payloads deduplicate; conflicts refuse." }),
+  Type.Object({ action: Type.Literal("inbox"), cursor }, { ...strict, description: "Read this manager's inbox and outstanding counts. Follow returned next_cursor for later pages; do not acknowledge unseen messages. Use on notices, not a model-driven polling loop." }),
+  Type.Object({ action: Type.Literal("ack"), message_ids: ids }, { ...strict, description: "Acknowledge up to 8 publication UUIDs actually read. This does not resolve a question/blocker; acknowledged results become eligible for retention cleanup." }),
+  Type.Object({ action: Type.Literal("escalate"), message_id: id, note: Type.String() }, { ...strict, description: "Mark a request as needing human attention with a nonblank note, at most 4 KiB UTF-8. Escalation remains outstanding until explicit resolution; it grants no permission." }),
+  Type.Object({ action: Type.Literal("reply"), message_id: id, request_id: id, text: Type.String() }, { ...strict, description: "Manager replies to an unresolved question/blocker's saved originating runtime with correlated text, at most 4 KiB UTF-8. Use a fresh request UUID per logical reply. Does not resolve the request or answer native approvals. Stale targets refuse; never blindly retry uncertain dispatch." }),
+  Type.Object({ action: Type.Literal("resolve"), message_id: id, note: Type.String() }, { ...strict, description: "Assigned manager or originating worker explicitly closes a handled request with a nonblank note, at most 4 KiB UTF-8. Reading, acknowledgement and reply do not close it automatically." }),
 ] as const;
 export const communicationToolRequestSchema = Type.Union([...communicationToolRequests]);
 export type CommunicationToolRequest = Static<typeof communicationToolRequestSchema>;
