@@ -58,6 +58,31 @@ func managedFixture(t *testing.T) Managed {
 	return managed
 }
 
+func TestObserveManagedExecutableAliasPreservesOriginalExecPath(t *testing.T) {
+	managed := managedFixture(t)
+	alias := filepath.Join(t.TempDir(), "pi")
+	if err := os.Symlink(managed.Executable, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliased, err := ObserveManaged(alias)
+	if err != nil {
+		t.Fatalf("recognized launcher alias rejected: %v", err)
+	}
+	if aliased.Executable != alias {
+		t.Fatalf("native executable was replaced: %s", aliased.Executable)
+	}
+	canonical, err := filepath.EvalSymlinks(managed.Executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aliased.Observation.Launcher.Path != canonical {
+		t.Fatalf("launcher observation is not canonical: %s", aliased.Observation.Launcher.Path)
+	}
+	if err := Recheck(aliased); err != nil {
+		t.Fatalf("stable launcher alias failed recheck: %v", err)
+	}
+}
+
 func TestObserveManagedRecognizedFrozenLayout(t *testing.T) {
 	managed := managedFixture(t)
 	if managed.Observation.Version != "1.4.0" {
@@ -72,6 +97,23 @@ func TestObserveManagedRecognizedFrozenLayout(t *testing.T) {
 	}
 	if managed.Observation.BinLink.Path != filepath.Join(filepath.Dir(filepath.Dir(launcher)), "install", "releases", "1.4.0", "node_modules", ".bin", "pi") {
 		t.Fatalf("wrong observed managed bin: %s", managed.Observation.BinLink.Path)
+	}
+}
+
+func TestObserveRejectsDeclaredEntryEscapingPackage(t *testing.T) {
+	managed := managedFixture(t)
+	outside := filepath.Join(t.TempDir(), "outside.js")
+	if err := os.WriteFile(outside, []byte("#!/usr/bin/env node\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(managed.Observation.Entry.Path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, managed.Observation.Entry.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Observe(managed.Executable); err == nil {
+		t.Fatal("declared native entry escaped the observed package")
 	}
 }
 

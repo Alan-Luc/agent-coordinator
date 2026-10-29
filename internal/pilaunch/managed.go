@@ -92,13 +92,13 @@ func lookPath(name, path string) (string, error) {
 
 func Observe(executable string) (Observation, error) {
 	var result Observation
-	launcher, err := observeFile(executable, 1<<20)
-	if err != nil || launcher.Hash != launcherSHA256 {
-		return result, errors.New("unrecognized managed Pi launcher")
-	}
 	launcherPath, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return result, errors.New("managed Pi launcher cannot be resolved")
+	}
+	launcher, err := observeFile(launcherPath, 1<<20)
+	if err != nil || launcher.Hash != launcherSHA256 {
+		return result, errors.New("unrecognized managed Pi launcher")
 	}
 	agentDir := filepath.Dir(filepath.Dir(launcherPath))
 	installDir := filepath.Join(agentDir, "install")
@@ -134,7 +134,8 @@ func Observe(executable string) (Observation, error) {
 		return result, errors.New("managed Pi bin entry unavailable")
 	}
 	want := filepath.Join(filepath.Dir(pkgPath), meta.Bin["pi"])
-	if !sameResolvedEntry(bin, want) {
+	packageRoot, rootErr := filepath.EvalSymlinks(filepath.Dir(pkgPath))
+	if rootErr != nil || !strings.HasPrefix(entryPath, packageRoot+string(filepath.Separator)) || !sameResolvedEntry(bin, want) {
 		return result, errors.New("managed Pi bin link mismatch")
 	}
 	entry, err := observeFile(entryPath, 16<<20)
