@@ -16,6 +16,7 @@ func TransparentConfig(owner, job string) string {
 		"set-option -g @ac_owner " + owner,
 		"set-option -g @ac_job " + job,
 		"set-option -g @ac_protocol 2",
+		"set-hook -g pane-died { detach-client -s ac-" + job + " ; detach-client -s ac-return-" + job + " }",
 		"set-option -g prefix None",
 		"set-option -g prefix2 None",
 		"set-option -g extended-keys on",

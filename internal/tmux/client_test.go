@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 func TestPrivateServerCreateInspectRemove(t *testing.T) {
@@ -169,6 +171,79 @@ func TestTransparentViewsShareOnePaneAndRefuseBystanders(t *testing.T) {
 	}
 	if _, err := client.InspectTransparent(context.Background(), socket, "initial", "return"); err == nil {
 		t.Fatal("accepted an extra window")
+	}
+}
+
+func TestTransparentPaneExitDetachesBothViews(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux unavailable")
+	}
+	root, err := os.MkdirTemp("/tmp", "ac-pane-exit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "socket")
+	config := filepath.Join(root, "tmux.conf")
+	launcher := filepath.Join(root, "launcher")
+	exitFile := filepath.Join(root, "exit")
+	if err := os.WriteFile(config, []byte(TransparentConfig("owner", "job123")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nwhile [ ! -f \"$AC_EXIT_FILE\" ]; do sleep 0.02; done\nexit 7\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: tmuxPath}
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TERM=xterm-256color", "AC_EXIT_FILE=" + exitFile}
+	if err := client.Create(context.Background(), CreateOptions{Socket: socket, Config: config, Session: "ac-job123", Executable: launcher, JobID: "job123", RuntimeDir: root, Env: env, Width: 80, Height: 24}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "ac-job123") })
+	if err := client.CreateReturnView(context.Background(), socket, "ac-job123", "ac-return-job123"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "ac-return-job123") })
+	var clients []<-chan error
+	for _, session := range []string{"ac-job123", "ac-return-job123"} {
+		cmd := client.AttachCommand(context.Background(), socket, session, false)
+		cmd.Env = env
+		terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 80})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = terminal.Close() })
+		clients = append(clients, done)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snapshot, err := client.InspectTransparent(context.Background(), socket, "ac-job123", "ac-return-job123")
+		if err == nil && snapshot.Clients == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("both clients did not attach: %+v, %v", snapshot, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := os.WriteFile(exitFile, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, done := range clients {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("pane exit did not detach cleanly: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("pane exit left an attached client stuck")
+		}
+	}
+	snapshot, err := client.InspectTransparent(context.Background(), socket, "ac-job123", "ac-return-job123")
+	if err != nil || !snapshot.PaneDead || snapshot.ExitStatus == nil || *snapshot.ExitStatus != 7 || snapshot.Clients != 0 {
+		t.Fatalf("exit facts were not retained after detach: %+v, %v", snapshot, err)
 	}
 }
 
