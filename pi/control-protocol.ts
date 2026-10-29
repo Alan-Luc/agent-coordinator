@@ -10,7 +10,7 @@ export const agentReportSchema = Type.Object({ summary: Type.String(), attention
 export const observedPromptSchema = Type.Object({ kind: Type.String(), title: Type.Optional(Type.String()) }, { additionalProperties: false });
 export const sessionStatusSchema = Type.Object({
   protocol: Type.Literal(controlProtocol), job_id: Type.String(), owner: Type.String(), session_id: Type.String(), generation: Type.String(), pid: Type.Integer(), updated_at: Type.Integer(),
-  activity: Type.Union([Type.Literal("unknown"), Type.Literal("idle"), Type.Literal("busy")]), prompt: Type.Optional(observedPromptSchema), report: Type.Optional(agentReportSchema),
+  activity: Type.Union([Type.Literal("unknown"), Type.Literal("idle"), Type.Literal("busy")]), launch_protocol: Type.Optional(Type.Literal("2")), prompt: Type.Optional(observedPromptSchema), report: Type.Optional(agentReportSchema),
 }, { additionalProperties: false });
 export const jobFactsSchema = Type.Object({
   id: Type.String(), name: Type.String(), launch: Type.String(), terminal: Type.String(),

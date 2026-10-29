@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
@@ -12,6 +15,7 @@ const sessionId = randomUUID();
 const sessionFile = fileURLToPath(import.meta.url);
 const managerId = randomUUID();
 const jobId = randomUUID();
+const managerHostJobId = randomUUID();
 const jobFacts = { id: jobId, name: "worker", launch: "running", terminal: "attached", pi_readiness: "unverified", task_outcome: "unknown", clients: 1, retired: false, next_action: "inspect" };
 const manager = { id: managerId, session_file: sessionFile, session_id: sessionId, enabled: true };
 const processIdentity = { boot_id: "3e322019-1073-4f52-afd0-abed9a17ce70", pid: process.pid, uid: process.getuid?.() ?? 501, start_sec: 10, start_usec: 0 };
@@ -20,7 +24,7 @@ type Listener = (...args: unknown[]) => unknown;
 interface TestRequest { action: string; caller?: CommunicationCaller; job_id?: string; task?: string; cursor?: number; message_ids?: string[]; }
 function callerGeneration(request: TestRequest): string { assert.ok(request.caller); return request.caller.generation; }
 function requestedJobId(request: TestRequest): string { assert.ok(request.job_id); return request.job_id; }
-function harness(response: (request: TestRequest) => unknown, mode = "rpc", status?: () => SessionStatus | undefined) {
+function harness(response: (request: TestRequest) => unknown, mode = "rpc", status?: () => SessionStatus | undefined, hostResponse?: { code: number; stdout: string }, requirePublication = false) {
   const events = new Map<string, Listener>();
   const commands = new Map<string, { handler: Listener }>();
   const requests: TestRequest[] = [];
@@ -28,10 +32,17 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
   const notifications: string[] = [];
   const widgets: string[][] = [];
   const confirmations: string[] = [];
-  const target = { id: jobId, session_id: randomUUID(), generation: randomUUID(), pane: { boot_id: "3e322019-1073-4f52-afd0-abed9a17ce70", pid: 123, uid: 501, start_sec: 10, start_usec: 0 } };
+  const currentStatus = status ?? (() => undefined);
+  const protocol2Status = currentStatus();
+  const workerTarget = { id: jobId, session_id: randomUUID(), generation: randomUUID(), pane: { ...processIdentity, pid: 123 } };
+  const target = protocol2Status ? { id: protocol2Status.job_id, session_id: protocol2Status.session_id, generation: protocol2Status.generation, pane: { ...processIdentity, pid: protocol2Status.pid } } : workerTarget;
+  const hostRequests: unknown[] = [];
+  const endpointCalls: string[] = [];
+  let publications = 0;
   let currentSessionId: string = sessionId;
   let currentSessionFile: string | undefined = sessionFile;
   let confirmation: boolean | (() => boolean) = true;
+  let reverseTargetFields = false;
   const pi = {
     on: (event: string, fn: Listener) => { events.set(event, fn); return () => events.delete(event); },
     registerCommand: (name: string, value: { handler: Listener }) => { commands.set(name, value); },
@@ -40,7 +51,9 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
   const cli = {
     findExecutable: async () => "/bin/agent-coordinator",
     runCli: async (_exe: string, argv: string[], _cwd: string, input?: string) => {
-      if (argv[0] === "_target") return { code: 0, stdout: JSON.stringify(target) };
+      if (argv[0] === "_target") { if (requirePublication) assert.ok(publications > 0, "target lookup must await current native observation publication"); endpointCalls.push("_target"); const selected = argv[1] === target.id ? target : workerTarget; const wireTarget = reverseTargetFields ? { pane: { start_usec: selected.pane.start_usec, start_sec: selected.pane.start_sec, uid: selected.pane.uid, pid: selected.pane.pid, boot_id: selected.pane.boot_id }, generation: selected.generation, session_id: selected.session_id, id: selected.id } : selected; return { code: 0, stdout: JSON.stringify(JSON.parse(JSON.stringify(wireTarget)) as unknown) }; }
+      if (argv[0] === "_features") { endpointCalls.push("_features"); return { code: 0, stdout: JSON.stringify({ features: { interactive_launch: 1, terminal_profile: "transparent-v1", manager_host: 1, pending_manager: 1 } }) }; }
+      if (argv[0] === "_manager-host") { endpointCalls.push("_manager-host"); hostRequests.push(JSON.parse(input ?? "null") as unknown); return hostResponse ?? { code: 0, stdout: JSON.stringify({ role: { schema: 1, role: "manager-host" } }) }; }
       assert.deepEqual(argv, ["_communication", "--json"]);
       const parsed: unknown = JSON.parse(input ?? "null");
       assert.ok(Value.Check(communicationRequestSchema, parsed));
@@ -51,7 +64,7 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
       return { code: "error" in result ? 1 : 0, stdout: JSON.stringify(result) };
     },
   };
-  const controller = { status: status ?? (() => undefined), report: async () => undefined };
+  const controller = { status: currentStatus, publishStatus: async () => { await new Promise<void>((resolveRefresh) => setImmediate(resolveRefresh)); publications++; return currentStatus(); }, report: async () => undefined };
   const adapter: ReturnType<typeof registerManager> = Reflect.apply(registerManager, undefined, [pi, controller, cli]);
   const context = {
     cwd: "/tmp",
@@ -64,7 +77,7 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
     start: (request: Parameters<typeof adapter.start>[0], signal: AbortSignal | undefined, ctx: typeof context): ReturnType<typeof adapter.start> => Reflect.apply(adapter.start, adapter, [request, signal, ctx]),
     execute: (request: Parameters<typeof adapter.execute>[0], signal: AbortSignal | undefined, ctx: typeof context): ReturnType<typeof adapter.execute> => Reflect.apply(adapter.execute, adapter, [request, signal, ctx]),
   };
-  return { adapter: calls, context, events, commands, requests, messages, notifications, widgets, confirmations, target, setConfirmation: (value: boolean | (() => boolean)) => { confirmation = value; }, changeSession: (value: string) => { currentSessionId = value; }, setSessionFile: (value: string | undefined) => { currentSessionFile = value; } };
+  return { adapter: calls, context, events, commands, requests, messages, notifications, widgets, confirmations, target, hostRequests, endpointCalls, setConfirmation: (value: boolean | (() => boolean)) => { confirmation = value; }, reverseTargetFields: () => { reverseTargetFields = true; }, changeSession: (value: string) => { currentSessionId = value; }, setSessionFile: (value: string | undefined) => { currentSessionFile = value; } };
 }
 
 test("uninitialized session start is definitively unmanaged", async () => {
@@ -79,6 +92,312 @@ test("a newly persisted conversation can start after unpersisted startup", async
   h.setSessionFile(sessionFile);
   assert.deepEqual(await h.adapter.start({ name: "worker", cwd: ".", task: "Inspect only" }, undefined, h.context), { managed: false });
   await h.events.get("session_shutdown")?.();
+});
+
+test("protocol2 manage-on reserves the exact host and enrolls only after genuine persistence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-pending-"));
+  const nativeFile = join(directory, "native.jsonl");
+  const generation = randomUUID();
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation, pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(request => {
+    if (request.action === "capability") return { capability: { protocol: 1 } };
+    if (request.action === "enroll") return { manager: { id: managerId, session_file: request.caller?.session_file, session_id: request.caller?.session_id, enabled: true, lease: { generation: callerGeneration(request), process: processIdentity } } };
+    if (request.action === "adopt") return { binding: { job_id: requestedJobId(request), manager_id: managerId } };
+    return { error: { code: "unexpected", message: "unexpected", uncertain: false } };
+  }, "tui", () => status, undefined, true);
+  h.setSessionFile(nativeFile);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    h.reverseTargetFields();
+    const pending = await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    assert.deepEqual(pending, { awaiting_conversation: { job_id: managerHostJobId } });
+    assert.deepEqual(h.endpointCalls.slice(0, 3), ["_target", "_features", "_target"]);
+    assert.equal(h.endpointCalls.filter(action => action === "_manager-host").length, 1);
+    assert.deepEqual(h.hostRequests, [{ target: h.target }]);
+    const beforePersistence = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.deepEqual(beforePersistence, { awaiting_conversation: { job_id: managerHostJobId } });
+    assert.equal(h.requests.some(request => request.action === "adopt"), false);
+
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId })}\n`);
+    const adopted = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.deepEqual(adopted, { binding: { job_id: jobId, manager_id: managerId } });
+    assert.deepEqual(h.requests.filter(request => request.action === "enroll" || request.action === "adopt").map(request => request.action), ["enroll", "adopt"]);
+    assert.equal(h.requests.find(request => request.action === "enroll")?.caller?.session_file, await realpath(nativeFile));
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("unpersisted protocol2 startup remains unmanaged after deliberate persistence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-standalone-"));
+  const nativeFile = join(directory, "native.jsonl");
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(request => request.action === "capability" ? { capability: { protocol: 1 } } : { error: { code: "manager_unknown", message: "not enrolled", uncertain: false } }, "tui", () => status);
+  h.setSessionFile(nativeFile);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId })}\n`);
+    assert.deepEqual(await h.adapter.start({ name: "worker", cwd: ".", task: "Inspect only" }, undefined, h.context), { managed: false });
+    assert.deepEqual(h.notifications, [], "a never-enrolled conversation must not warn about failed reconnect");
+    assert.equal(h.requests.some(request => request.action === "enroll"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("slash manage-on uses the protocol2 consent path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-command-pending-"));
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.commands.get("coordinator")?.handler("manage on", h.context);
+    assert.equal(h.endpointCalls.filter(action => action === "_manager-host").length, 1);
+    assert.ok(h.notifications.some(message => message.includes("awaits a persisted conversation")));
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("manage-off cancels memory-only consent without clearing sticky host reservation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-cancel-pending-"));
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    assert.deepEqual(await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context), { awaiting_conversation: { job_id: managerHostJobId } });
+    const cancelled = await h.adapter.execute({ action: "manage", enabled: false }, undefined, h.context);
+    assert.ok("error" in cancelled && cancelled.error.code === "pending_cancelled");
+    assert.equal(h.endpointCalls.filter(action => action === "_manager-host").length, 1);
+    assert.equal(h.requests.some(request => request.action === "enroll" || request.action === "pause"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("changed protocol2 controller generation cancels pending consent before dispatch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-stale-pending-"));
+  let status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    status = { ...status, generation: randomUUID() };
+    const result = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in result && result.error.code === "pending_consent_stale");
+    assert.equal(h.requests.some(request => request.action === "enroll" || request.action === "adopt"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("same PID with changed process birth fences pending consent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-birth-changed-"));
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    h.target.pane.start_usec++;
+    const result = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in result && result.error.code === "pending_consent_stale");
+    assert.equal(h.requests.some(request => request.action === "enroll" || request.action === "adopt"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("mismatched persisted session header remains fenced after the header is restored", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-header-mismatch-"));
+  const nativeFile = join(directory, "native.jsonl");
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(nativeFile);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: randomUUID() })}\n`);
+    const result = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in result && result.error.code === "pending_consent_stale");
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId })}\n`);
+    const start = await h.adapter.start({ name: "worker", cwd: ".", task: "Inspect only" }, undefined, h.context);
+    assert.equal(start.managed, true);
+    if (start.managed) assert.notEqual(start.code, 0);
+    assert.equal(h.requests.some(request => request.action === "enroll" || request.action === "adopt" || request.action === "start"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("changed native session id invalidates pending consent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-session-changed-"));
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    h.changeSession(randomUUID());
+    const result = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in result && result.error.code === "pending_consent_stale");
+    assert.equal(h.requests.some(request => request.action === "enroll" || request.action === "adopt"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("session replacement during confirmation refuses sticky host promotion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-consent-stale-"));
+  let status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  h.setConfirmation(() => { status = { ...status, generation: randomUUID() }; return true; });
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    const result = await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    assert.ok("error" in result && result.error.code === "confirmation_cancelled");
+    assert.equal(h.endpointCalls.includes("_manager-host"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("uncertain persisted enrollment is not reissued from old consent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-enroll-uncertain-"));
+  const nativeFile = join(directory, "native.jsonl");
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(request => {
+    if (request.action === "capability") return { capability: { protocol: 1 } };
+    if (request.action === "enroll") throw new Error("response lost after enrollment");
+    if (request.action === "pause") return { manager: { id: managerId, session_file: request.caller?.session_file, session_id: request.caller?.session_id, enabled: false, lease: { generation: callerGeneration(request), process: processIdentity } } };
+    if (request.action === "start") return { started: jobFacts };
+    return { error: { code: "unused", message: "unused", uncertain: false } };
+  }, "tui", () => status);
+  h.setSessionFile(nativeFile);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId })}\n`);
+    const adopt = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in adopt && adopt.error.uncertain);
+    const enrollmentCount = h.requests.filter(request => request.action === "enroll").length;
+    const next = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in next && next.error.uncertain);
+    const start = await h.adapter.start({ name: "worker", cwd: ".", task: "Inspect only" }, undefined, h.context);
+    assert.equal(start.managed, true);
+    if (start.managed) assert.equal(start.code, 75);
+    assert.equal(h.requests.filter(request => request.action === "enroll").length, enrollmentCount);
+    const manageOff = await h.adapter.execute({ action: "manage", enabled: false }, undefined, h.context);
+    assert.ok("manager" in manageOff && manageOff.manager.enabled === false);
+    assert.deepEqual(h.requests.filter(request => request.action === "pause").map(request => request.action), ["pause"]);
+    assert.equal(h.requests.some(request => request.action === "adopt" || request.action === "start"), false);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("confirmed manage-off clears uncertain enrollment only on definitive manager_unknown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-enroll-unknown-pause-"));
+  const nativeFile = join(directory, "native.jsonl");
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(request => request.action === "capability" ? { capability: { protocol: 1 } }
+    : request.action === "enroll" ? (() => { throw new Error("lost enrollment response"); })()
+    : request.action === "pause" ? { error: { code: "manager_unknown", message: "manager is definitively unknown", uncertain: false } }
+    : { error: { code: "unused", message: "unused", uncertain: false } }, "tui", () => status);
+  h.setSessionFile(nativeFile);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId })}\n`);
+    const enrollment = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in enrollment && enrollment.error.uncertain);
+    const paused = await h.adapter.execute({ action: "manage", enabled: false }, undefined, h.context);
+    assert.ok("error" in paused && paused.error.code === "manager_unknown" && !paused.error.uncertain);
+    assert.equal(h.requests.filter(request => request.action === "pause").length, 1);
+    const start = await h.adapter.start({ name: "worker", cwd: ".", task: "Inspect only" }, undefined, h.context);
+    assert.equal(start.managed, true);
+    if (start.managed) assert.equal(start.code, 75);
+    assert.equal(h.requests.filter(request => request.action === "enroll").length, 1);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("uncertain pause keeps pending enrollment fenced", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-enroll-uncertain-pause-"));
+  const nativeFile = join(directory, "native.jsonl");
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(request => request.action === "capability" ? { capability: { protocol: 1 } }
+    : request.action === "enroll" || request.action === "pause" ? (() => { throw new Error("response lost"); })()
+    : { error: { code: "unused", message: "unused", uncertain: false } }, "tui", () => status);
+  h.setSessionFile(nativeFile);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    await writeFile(nativeFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId })}\n`);
+    const enrollment = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in enrollment && enrollment.error.uncertain);
+    const paused = await h.adapter.execute({ action: "manage", enabled: false }, undefined, h.context);
+    assert.ok("error" in paused && paused.error.uncertain);
+    const retry = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in retry && retry.error.uncertain);
+    assert.equal(h.requests.filter(request => request.action === "enroll").length, 1);
+    assert.equal(h.requests.filter(request => request.action === "pause").length, 1);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("protocol2 manager consent rejects denied confirmation and unavailable UI", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-host-failure-"));
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status);
+  h.setSessionFile(join(directory, "native.jsonl"));
+  h.setConfirmation(false);
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    const denied = await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    assert.ok("error" in denied && denied.error.code === "confirmation_cancelled");
+    assert.equal(h.endpointCalls.includes("_manager-host"), false);
+    const noUi = await h.adapter.execute({ action: "manage", enabled: true }, undefined, { ...h.context, hasUI: false });
+    assert.ok("error" in noUi && noUi.error.code === "confirmation_unavailable");
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("uncertain manager-host promotion never enrolls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "manager-host-uncertain-"));
+  const status: SessionStatus = { protocol: 1, launch_protocol: "2", job_id: managerHostJobId, owner: "owner", session_id: sessionId, generation: randomUUID(), pid: process.pid, updated_at: Date.now(), activity: "idle" };
+  const h = harness(() => ({ error: { code: "unused", message: "unused", uncertain: false } }), "tui", () => status, { code: 1, stdout: JSON.stringify({ error: { code: "uncertain", message: "host reservation response lost", uncertain: true } }) });
+  h.setSessionFile(join(directory, "native.jsonl"));
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    const result = await h.adapter.execute({ action: "manage", enabled: true }, undefined, h.context);
+    assert.ok("error" in result && result.error.uncertain);
+    assert.equal(h.requests.some(request => request.action === "enroll"), false);
+    assert.deepEqual(h.endpointCalls.slice(-1), ["_manager-host"]);
+  } finally {
+    await h.events.get("session_shutdown")?.();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("manager_unknown permits public starts but uncertain reconnect does not", async () => {
@@ -345,6 +664,23 @@ test("worker prompt changes notify once without relying on updated_at", { timeou
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(h.notifications.length, 1);
   await h.events.get("session_shutdown")?.();
+});
+
+test("adoption rejects a mismatched target UUID before confirmation or dispatch", async () => {
+  const h = harness(request => {
+    if (request.action === "capability") return { capability: { protocol: 1 } };
+    if (request.action === "reconnect") return { manager: { ...manager, lease: { generation: callerGeneration(request), process: processIdentity } } };
+    return { binding: { job_id: jobId, manager_id: managerId } };
+  });
+  try {
+    await h.events.get("session_start")?.({}, h.context);
+    h.target.id = randomUUID();
+    const result = await h.adapter.execute({ action: "adopt", id: jobId }, undefined, h.context);
+    assert.ok("error" in result);
+    assert.equal(result.error.code, "invalid_target");
+    assert.deepEqual(h.confirmations, []);
+    assert.equal(h.requests.some(request => request.action === "adopt"), false);
+  } finally { await h.events.get("session_shutdown")?.(); }
 });
 
 test("adoption sends the exact confirmed target after native approval", async () => {

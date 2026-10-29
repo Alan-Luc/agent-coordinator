@@ -6,6 +6,7 @@ import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { coordinatorTool, registerCoordinator } from "./index.ts";
 import { communicationRequestSchema, communicationResultSchema, type CommunicationAdapter, type CommunicationToolRequest, type CommunicationRequest, type CommunicationResult } from "./communication-protocol.ts";
+import { awaitingConversationSchema } from "./manager-host-protocol.ts";
 
 test("coordinator exposes attributed communication without model-selected caller identity", () => {
   const request = { request: { action: "publish", message_id: "560ee6df-3ce6-4231-9656-c318a839659e", kind: "question", text: "Which local fixture should I use?" } };
@@ -29,6 +30,12 @@ test("acknowledgement, reply and explicit resolution are separate requests", () 
   for (const request of requests) assert.equal(Value.Check(coordinatorTool.parameters, { request }), true, request.action);
 });
 
+test("awaiting-conversation is a strict public management result", () => {
+  assert.equal(Value.Check(awaitingConversationSchema, { awaiting_conversation: { job_id: "560ee6df-3ce6-4231-9656-c318a839659e" } }), true);
+  assert.equal(Value.Check(awaitingConversationSchema, { awaiting_conversation: { job_id: "bad" } }), false);
+  assert.equal(Value.Check(awaitingConversationSchema, { awaiting_conversation: { job_id: "560ee6df-3ce6-4231-9656-c318a839659e", manager_id: "extra" } }), false);
+});
+
 test("authoritative wire schemas retain their discriminated TypeScript unions", () => {
   const caller = { session_file: "/private/session.jsonl", session_id: "native", generation: "560ee6df-3ce6-4231-9656-c318a839659e", pid: 123 };
   const requests: CommunicationRequest[] = [
@@ -39,6 +46,7 @@ test("authoritative wire schemas retain their discriminated TypeScript unions", 
   const results: CommunicationResult[] = [
     { capability: { protocol: 1 } }, { released: true }, { messages: [] },
     { inbox: { messages: [], pending: 0, escalated: 0, degraded: false, workers: [] } },
+    { awaiting_conversation: { job_id: "560ee6df-3ce6-4231-9656-c318a839659e" } },
   ];
   for (const request of requests) assert.equal(Value.Check(communicationRequestSchema, request), true);
   for (const result of results) assert.equal(Value.Check(communicationResultSchema, result), true);

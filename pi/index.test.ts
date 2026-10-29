@@ -127,6 +127,23 @@ test("inherited job activation requires exact recorded pane PID", async () => {
     await writeFile(manifestPath, JSON.stringify({ ...manifest, boot_id_scheme: "darwin-boot-session-uuid" }));
     await writeFile(launchPath, JSON.stringify({ schema: 1, phase: "exec-intent", server: { ...identity, pid: process.pid + 1 }, pane: { ...identity, pid: process.pid + 1 } }), { mode: 0o600 });
     assert.equal(await verifyInheritedJob(), undefined, "descendant must not activate its parent's endpoint");
+    await writeFile(launchPath, JSON.stringify({ schema: 1, phase: "exec-intent", server: { ...identity, pid: process.pid + 1 }, pane: identity }), { mode: 0o600 });
+    await writeFile(manifestPath, JSON.stringify({ ...manifest, protocol: "2", boot_id_scheme: "darwin-boot-session-uuid" }));
+    assert.equal(await verifyInheritedJob(), undefined, "protocol2 without intent and role must fail closed");
+    const fileObservation = { Path: "/managed/file", Hash: "a".repeat(64), Size: 1, Mode: 0, UID: uid, Dev: 1, Ino: 1 };
+    const observation = { Launcher: fileObservation, Current: fileObservation, Package: fileObservation, BinLink: { Path: "/managed/link", Target: "target", UID: uid, Dev: 1, Ino: 1 }, Entry: fileObservation, Version: "1.4.0" };
+    await writeFile(join(job, "intent.json"), JSON.stringify({ schema: 1, kind: "interactive", terminal_profile: "transparent-v1", argv_sha256: "a".repeat(64), native_pi: { Executable: "/bin/pi", Observation: observation } }), { mode: 0o600 });
+    await writeFile(join(job, "launch-argv.json"), JSON.stringify({ schema: 1, argv: [] }), { mode: 0o600 });
+    await writeFile(join(job, "role.json"), JSON.stringify({ schema: 1, role: "standalone" }), { mode: 0o600 });
+    await rm(join(job, "launch-argv.json"));
+    const protocol2 = await verifyInheritedJob();
+    assert.equal(protocol2?.protocol, "2", "well-shaped protocol2 activation retains recorded pane identity");
+    assert.deepEqual(protocol2?.pane, identity);
+    await writeFile(join(job, "launch-argv.json"), JSON.stringify({ schema: 1, argv: [] }), { mode: 0o600 });
+    assert.equal(await verifyInheritedJob(), undefined, "leftover launch payload must refuse activation after bootstrap");
+    await rm(join(job, "launch-argv.json"));
+    await writeFile(join(job, "role.json"), JSON.stringify({ schema: 1, role: "unexpected" }), { mode: 0o600 });
+    assert.equal(await verifyInheritedJob(), undefined, "unsupported role fails closed");
   } finally {
     for (const [key, value] of previous) value === undefined ? delete process.env[key] : process.env[key] = value;
     await rm(root, { recursive: true, force: true });

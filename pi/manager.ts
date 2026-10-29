@@ -1,15 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
+import { open, realpath } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import { communicationErrorSchema, communicationProtocol, communicationRequestSchema, communicationResultSchema, communicationToolRequestSchema, type CommunicationAdapter, type CommunicationCaller, type CommunicationCli, type CommunicationError, type CommunicationInbox, type CommunicationManager, type CommunicationToolRequest as AdapterToolRequest, type CommunicationRequest as AdapterRequest, type CommunicationResult as AdapterResponse } from "./communication-protocol.ts";
-import { sessionTargetSchema, type SessionTarget } from "./control-protocol.ts";
+import { sessionTargetSchema, type SessionStatus, type SessionTarget } from "./control-protocol.ts";
+import { awaitingConversationSchema, launchFeaturesSchema, managerHostRequestSchema, managerHostResultSchema } from "./manager-host-protocol.ts";
 import type { SessionController } from "./session-control.ts";
 
 const pollIntervalMs = 2_000;
 const noticeType = "coordinator-communication";
 const unsafeTerminal = /[\u0000-\u001f\u007f-\u009f\u001b]/gu;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+interface PendingConsent {
+  sessionFile: string;
+  target: SessionTarget;
+  lifecycle: number;
+  fenced: boolean;
+}
 
 interface Runtime {
   generation: string;
@@ -41,6 +51,11 @@ interface Runtime {
 }
 
 function clean(text: string): string { return text.replace(unsafeTerminal, " "); }
+function sameTarget(left: SessionTarget, right: SessionTarget): boolean {
+  return left.id === right.id && left.session_id === right.session_id && left.generation === right.generation
+    && left.pane.boot_id === right.pane.boot_id && left.pane.pid === right.pane.pid && left.pane.uid === right.pane.uid
+    && left.pane.start_sec === right.pane.start_sec && left.pane.start_usec === right.pane.start_usec;
+}
 function sameCaller(left: CommunicationCaller, right: CommunicationCaller | undefined): boolean {
   return !!right && left.session_file === right.session_file && left.session_id === right.session_id && left.generation === right.generation && left.job_id === right.job_id;
 }
@@ -51,6 +66,7 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
   let sessionInitialization: Promise<void> | undefined;
   let lifecycle = 0;
   let pendingSession: { id: string; epoch: number } | undefined;
+  let pendingConsent: PendingConsent | undefined;
   let cliQueue = Promise.resolve();
 
   async function runCli(args: string[], cwd: string, input: string | undefined, signal?: AbortSignal, timeoutMs?: number) {
@@ -98,6 +114,92 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
     } catch { return undefined; }
   }
 
+  async function managerHost(ctx: ExtensionContext, signal?: AbortSignal): Promise<{ status: SessionStatus; target: SessionTarget } | CommunicationError> {
+    const status = await controller.publishStatus();
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (!status || status.launch_protocol !== "2" || status.pid !== process.pid || status.session_id !== sessionId || !uuid.test(status.job_id) || !uuid.test(status.generation)) return error("session_unavailable", "No fresh protocol2 owned controller is available.");
+    try {
+      const outcome = await runCli(["_target", status.job_id, "--json"], ctx.cwd, undefined, operationSignal(signal));
+      const target: unknown = JSON.parse(outcome.stdout) as unknown;
+      if (outcome.code !== 0 || !isSessionTarget(target) || target.id !== status.job_id || target.session_id !== status.session_id || target.generation !== status.generation || target.pane.pid !== status.pid) return error("stale_target", "Coordinator target does not match the current protocol2 controller.");
+      if (controller.status()?.generation !== status.generation) return error("stale_target", "Protocol2 controller changed during target verification.");
+      return { status, target };
+    } catch (cause) { return error("coordinator_error", cause instanceof Error ? cause.message : "Could not verify the protocol2 manager host."); }
+  }
+
+  async function negotiateHost(ctx: ExtensionContext, signal?: AbortSignal): Promise<CommunicationError | undefined> {
+    try {
+      const outcome = await runCli(["_features", "--json"], ctx.cwd, undefined, operationSignal(signal));
+      const features: unknown = JSON.parse(outcome.stdout) as unknown;
+      if (outcome.code !== 0 || !Value.Check(launchFeaturesSchema, features)) return error("unsupported", "Coordinator protocol2 manager-host features are unavailable.");
+      return undefined;
+    } catch (cause) { return error("unsupported", cause instanceof Error ? cause.message : "Coordinator protocol2 manager-host features are unavailable."); }
+  }
+
+  async function promoteHost(target: SessionTarget, ctx: ExtensionContext, signal?: AbortSignal): Promise<CommunicationError | undefined> {
+    try {
+      const input = { target };
+      if (!Value.Check(managerHostRequestSchema, input)) return error("invalid_target", "Manager-host target is outside the endpoint contract.");
+      const outcome = await runCli(["_manager-host", "--json"], ctx.cwd, `${JSON.stringify(input)}\n`, operationSignal(signal));
+      const result: unknown = JSON.parse(outcome.stdout) as unknown;
+      if (outcome.code !== 0) return Value.Check(communicationErrorSchema, result) ? result : error("uncertain", "Manager-host reservation failed with an invalid response.", true);
+      if (!Value.Check(managerHostResultSchema, result)) return error("uncertain", "Coordinator returned an invalid manager-host reservation response.", true);
+      return undefined;
+    } catch (cause) { return error("uncertain", cause instanceof Error ? cause.message : "Manager-host reservation outcome is uncertain.", true); }
+  }
+
+  async function plannedSessionFile(ctx: ExtensionContext): Promise<string | undefined> {
+    const file = ctx.sessionManager.getSessionFile();
+    if (!file) return undefined;
+    try { return await realpath(file); }
+    catch { try { return resolve(await realpath(dirname(file)), basename(file)); } catch { return undefined; } }
+  }
+
+  async function persistedHeader(sessionFile: string, sessionId: string): Promise<boolean | undefined> {
+    let handle;
+    try { handle = await open(sessionFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+    catch (cause) { return typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT" ? undefined : false; }
+    try {
+      const buffer = Buffer.alloc(4096);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const newline = buffer.subarray(0, bytesRead).indexOf(10);
+      if (newline < 0) return false;
+      const header: unknown = JSON.parse(buffer.toString("utf8", 0, newline)) as unknown;
+      return typeof header === "object" && header !== null && "type" in header && header.type === "session" && "version" in header && header.version === 3 && "id" in header && header.id === sessionId;
+    } catch { return false; }
+    finally { await handle.close(); }
+  }
+
+  async function completePending(ctx: ExtensionContext, signal?: AbortSignal): Promise<CommunicationError | { awaiting_conversation: { job_id: string } } | undefined> {
+    const pending = pendingConsent;
+    if (!pending) return undefined;
+    if (pending.fenced) return error("pending_consent_uncertain", "Pending manager consent is fenced; a fresh human manage decision or lifecycle change is required.", true);
+    const current = runtime;
+    const host = await managerHost(ctx, signal);
+    const file = await plannedSessionFile(ctx);
+    if ("error" in host || runtime !== current || current?.stopped || pending.lifecycle !== lifecycle || pending.target.session_id !== ctx.sessionManager.getSessionId() || pending.target.id !== host.status.job_id || pending.sessionFile !== file || !sameTarget(pending.target, host.target)) {
+      pending.fenced = true;
+      return error("pending_consent_stale", "Pending manager consent no longer matches the native conversation.");
+    }
+    const persisted = await persistedHeader(pending.sessionFile, pending.target.session_id);
+    if (persisted === undefined) return { awaiting_conversation: { job_id: pending.target.id } };
+    if (!persisted) { pending.fenced = true; return error("pending_consent_stale", "Persisted native session header does not match pending manager consent."); }
+    const fresh = await managerHost(ctx, signal);
+    if ("error" in fresh || !sameTarget(fresh.target, host.target) || await persistedHeader(pending.sessionFile, pending.target.session_id) !== true) {
+      pending.fenced = true;
+      return error("pending_consent_stale", "Protocol2 host or persisted native header changed before authenticated enrollment.");
+    }
+    const who = await managerCaller(ctx);
+    if (!who || who.session_file !== pending.sessionFile) return error("session_unavailable", "Persisted manager identity is unavailable; pending consent remains until revalidation.");
+    const enrolled = await perform({ protocol: communicationProtocol, action: "enroll", caller: who }, ctx, signal);
+    if ("error" in enrolled) {
+      if (enrolled.error.uncertain) pending.fenced = true;
+      return enrolled;
+    }
+    pendingConsent = undefined;
+    return undefined;
+  }
+
   async function workerCaller(ctx: ExtensionContext): Promise<CommunicationCaller | undefined> {
     const sessionId = ctx.sessionManager.getSessionId();
     const file = ctx.sessionManager.getSessionFile();
@@ -130,6 +232,66 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
   async function execute(request: AdapterToolRequest, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<AdapterResponse | CommunicationError> {
     if (!isCommunicationToolRequest(request)) return error("invalid_request", "Communication request does not match the public action schema.");
     await ensureInitialized(ctx);
+    if (request.action === "manage" && !request.enabled && pendingConsent) {
+      if (!ctx.hasUI || signal?.aborted) return error("confirmation_unavailable", "Manager changes require native confirmation.");
+      if (pendingConsent.fenced) {
+        const pending = pendingConsent;
+        const current = runtime;
+        let confirmed = false;
+        try { confirmed = await ctx.ui.confirm("Pause coordinator delivery?", "Enrollment may have committed. Authenticate and pause this manager, or keep the manager state fenced if it cannot be verified."); }
+        catch { return error("confirmation_cancelled", "Manager change was cancelled."); }
+        if (!confirmed || signal?.aborted || pendingConsent !== pending || runtime !== current || !current || current.stopped || lifecycle !== pending.lifecycle || ctx.sessionManager.getSessionId() !== pending.target.session_id || await plannedSessionFile(ctx) !== pending.sessionFile) return error("confirmation_cancelled", "Manager change was denied or the session changed.");
+        const who = await managerCaller(ctx);
+        if (!who || who.session_file !== pending.sessionFile || who.session_id !== pending.target.session_id) return error("session_unavailable", "Persisted manager identity is unavailable; enrollment remains fenced.", true);
+        const paused = await perform({ protocol: communicationProtocol, action: "pause", caller: who }, ctx, signal);
+        if ("manager" in paused && !paused.manager.enabled) { pendingConsent = undefined; return paused; }
+        if ("error" in paused && !paused.error.uncertain && paused.error.code === "manager_unknown") { pendingConsent = undefined; return paused; }
+        return "error" in paused ? paused : error("pause_unverified", "Coordinator did not confirm manager pause; enrollment remains fenced.", true);
+      }
+      const pending = pendingConsent;
+      let confirmed = false;
+      try { confirmed = await ctx.ui.confirm("Cancel pending manager enrollment?", "This cancels consent before conversation persistence. The sticky manager-host reservation remains."); }
+      catch { return error("confirmation_cancelled", "Manager change was cancelled."); }
+      if (!confirmed || signal?.aborted || pendingConsent !== pending || lifecycle !== pending.lifecycle || ctx.sessionManager.getSessionId() !== pending.target.session_id) return error("confirmation_cancelled", "Pending manager cancellation was denied or the session changed.");
+      pendingConsent = undefined;
+      return error("pending_cancelled", "Pending manager consent was cancelled; the sticky host reservation remains.");
+    }
+    if (request.action === "manage" && request.enabled && pendingConsent) {
+      if (pendingConsent.fenced) return error("pending_consent_uncertain", "A fresh human manage decision is required after pending consent was invalidated.", true);
+      const pendingError = await completePending(ctx, signal);
+      if (pendingError) return pendingError;
+      return runtime?.manager ? { manager: runtime.manager } : error("session_unavailable", "Manager enrollment did not establish a manager identity.");
+    }
+    if (request.action === "manage" && request.enabled && controller.status()?.launch_protocol === "2") {
+      if (!ctx.hasUI || signal?.aborted || ctx.mode !== "tui") return error("confirmation_unavailable", "Protocol2 manager changes require native confirmation in the interactive TUI.");
+      const host = await managerHost(ctx, signal);
+      if ("error" in host) return host;
+      const featuresError = await negotiateHost(ctx, signal);
+      if (featuresError) return featuresError;
+      const plannedFile = await plannedSessionFile(ctx);
+      if (!plannedFile) return error("session_unavailable", "Native session path is unavailable.");
+      let confirmed = false;
+      try { confirmed = await ctx.ui.confirm("Enable coordinator manager?", "Reserve this protocol2 Pi as a sticky coordinator manager host. Enrollment will wait until a genuine conversation is persisted."); }
+      catch { return error("confirmation_cancelled", "Manager change was cancelled."); }
+      if (!confirmed || signal?.aborted || lifecycle !== (pendingSession?.epoch ?? lifecycle) || ctx.sessionManager.getSessionId() !== host.status.session_id) return error("confirmation_cancelled", "Manager change was denied or the session changed.");
+      const fresh = await managerHost(ctx, signal);
+      if ("error" in fresh || !sameTarget(fresh.target, host.target) || controller.status()?.generation !== host.status.generation) return error("confirmation_cancelled", "Protocol2 host changed during confirmation.");
+      const promoted = await promoteHost(host.target, ctx, signal);
+      if (promoted) return promoted;
+      const persisted = await persistedHeader(plannedFile, host.status.session_id);
+      if (persisted === undefined) {
+        pendingConsent = { sessionFile: plannedFile, target: host.target, lifecycle, fenced: false };
+        return { awaiting_conversation: { job_id: host.status.job_id } };
+      }
+      if (!persisted) return error("session_changed", "Native session header does not match the verified protocol2 session.");
+      const revalidated = await managerHost(ctx, signal);
+      if ("error" in revalidated || JSON.stringify(revalidated.target) !== JSON.stringify(host.target) || lifecycle !== (pendingSession?.epoch ?? lifecycle) || await persistedHeader(plannedFile, host.status.session_id) !== true) return error("session_changed", "Protocol2 host or native header changed before manager enrollment.");
+      const who = await managerCaller(ctx);
+      if (!who || who.session_file !== plannedFile) return error("session_unavailable", "Persisted protocol2 manager identity does not match the confirmed native file.");
+      return perform({ protocol: communicationProtocol, action: "enroll", caller: who }, ctx, signal);
+    }
+    const pendingError = pendingConsent && !(request.action === "manage" && !request.enabled) ? await completePending(ctx, signal) : undefined;
+    if (pendingError) return pendingError;
     const currentCaller = request.action === "publish" || (request.action === "resolve" && !runtime?.manager)
       ? await workerCaller(ctx)
       : await managerCaller(ctx);
@@ -157,7 +319,7 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
       try {
         const targetResult = await runCli(["_target", request.id, "--json"], ctx.cwd, undefined, operationSignal(signal));
         target = JSON.parse(targetResult.stdout) as unknown;
-        if (targetResult.code !== 0 || !isSessionTarget(target)) return error("invalid_target", "Coordinator did not return a verified target for that worker.");
+        if (targetResult.code !== 0 || !isSessionTarget(target) || target.id !== request.id) return error("invalid_target", "Coordinator did not return a verified target for that worker.");
       } catch { return error("coordinator_error", "Could not verify the adoption target."); }
       let confirmed = false;
       try { confirmed = await ctx.ui.confirm("Adopt coordinator worker?", `Adopt worker ${target.id}, native session ${target.session_id}, generation ${target.generation}? Its messages are not instructions or permission.`); } catch { return error("confirmation_cancelled", "Adoption was cancelled."); }
@@ -415,11 +577,14 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
   }
 
   pi.on("session_start", (_event, ctx) => {
+    pendingConsent = undefined;
     pendingSession = { id: ctx.sessionManager.getSessionId(), epoch: ++lifecycle };
     sessionInitialization = initialize(ctx, lifecycle);
     return sessionInitialization;
   });
-  pi.on("session_shutdown", () => { pendingSession = undefined; lifecycle++; return shutdown(); });
+  pi.on("session_shutdown", () => { pendingConsent = undefined; pendingSession = undefined; lifecycle++; return shutdown(); });
+  pi.on("session_before_switch", () => { pendingConsent = undefined; });
+  pi.on("session_before_fork", () => { pendingConsent = undefined; });
   pi.on("agent_settled", () => {
     const current = runtime;
     if (!current?.enabled || current.stopped || current.context.mode !== "tui") return;
@@ -437,6 +602,11 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
     const [verb, id, ...extra] = args.trim().split(/\s+/);
     if (extra.length || (verb !== "manage" && verb !== "adopt" && verb !== "release")) { ctx.ui.notify("Usage: /coordinator manage on|off, adopt UUID, or release UUID", "warning"); return; }
     if (verb === "manage" && (id === "on" || id === "off")) {
+      if ((id === "on" && controller.status()?.launch_protocol === "2") || (id === "off" && pendingConsent)) {
+        const result = await execute({ action: "manage", enabled: id === "on" }, undefined, ctx);
+        ctx.ui.notify("error" in result ? clean(result.error.message) : "awaiting_conversation" in result ? "Manager host reserved; enrollment awaits a persisted conversation." : "Coordinator manager state updated.", "error" in result ? "error" : "info");
+        return;
+      }
       const who = await managerCaller(ctx);
       if (!who) { ctx.ui.notify("A persisted session is required.", "error"); return; }
       if (id === "on") {
@@ -466,7 +636,11 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
       if (!current) return { managed: true, code: 1, stdout: JSON.stringify(error("session_unavailable", "Manager initialization did not establish a persisted session.")) };
       if (!sessionId || current.sessionId !== sessionId || !sessionFile) return { managed: true, code: 1, stdout: JSON.stringify(error("session_changed", "Manager start caller session is not the initialized conversation.")) };
       await current.ready;
-      if (await realpath(sessionFile).catch(() => "") !== current.sessionFile) return { managed: true, code: 1, stdout: JSON.stringify(error("session_changed", "Manager start caller file is not the initialized conversation.")) };
+      if (pendingConsent) {
+        const pendingError = await completePending(ctx, signal);
+        if (pendingError) return { managed: true, code: "error" in pendingError && pendingError.error.uncertain ? 75 : 1, stdout: JSON.stringify(pendingError) };
+      }
+      if (await plannedSessionFile(ctx) !== current.sessionFile) return { managed: true, code: 1, stdout: JSON.stringify(error("session_changed", "Manager start caller file is not the initialized conversation.")) };
       if (current.reconnectFailed) {
         const reason = current.reconnectError ?? error("manager_unavailable", "Manager reconnect failed; refusing an unassociated start.", true);
         return { managed: true, code: reason.error.uncertain ? 75 : 1, stdout: JSON.stringify(reason) };

@@ -5,11 +5,12 @@ import { createServer, type Server, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
-import { controlProtocol, controlRequestSchema, maxControlTextBytes, type AgentReport, type ControlReceipt, type ControlRequest, type ObservedPrompt, type SessionStatus } from "./control-protocol.ts";
+import { controlProtocol, controlRequestSchema, maxControlTextBytes, type AgentReport, type ControlReceipt, type ControlRequest, type ObservedPrompt, type ProcessIdentity, type SessionStatus } from "./control-protocol.ts";
 
 const maxWireBytes = 512 * 1024;
 const maxSummaryBytes = 1024;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const nativeSessionIdPattern = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const bootIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const bootIdScheme = "darwin-boot-session-uuid";
 
@@ -30,9 +31,13 @@ interface ActiveSession {
   stopping: boolean;
   cleanup?: Promise<void>;
   persistenceFailed: boolean;
+  protocol: "1" | "2";
+  pane: ProcessIdentity;
+  nativeSession?: NativeSessionObservation;
 }
 
 export interface SessionController {
+  publishStatus(): Promise<SessionStatus | undefined>;
   report(summary: string, attention?: string | null): Promise<SessionStatus | undefined>;
   status(): SessionStatus | undefined;
 }
@@ -56,6 +61,101 @@ export function parseControlRequest(value: unknown): ControlRequest | undefined 
   return value;
 }
 
+async function pathMissing(path: string): Promise<boolean> {
+  try { await lstat(path); return false; }
+  catch (error) { return record(error) && error.code === "ENOENT"; }
+}
+interface SessionHeaderObservation { id: string; device: number; inode: number }
+interface NativeSessionObservation {
+  schema: 1;
+  job_id: string;
+  owner: string;
+  session_id: string;
+  generation: string;
+  process: JsonRecord;
+  updated_at: string;
+  session_file: string;
+  cwd: string;
+  state: "unpersisted" | "persisted";
+  file?: { device: number; inode: number };
+  header_id?: string;
+}
+async function supportedSessionHeader(path: string): Promise<SessionHeaderObservation | undefined> {
+  let before;
+  try { before = await lstat(path); }
+  catch (error) { if (record(error) && error.code === "ENOENT") return undefined; throw error; }
+  if (before.isSymbolicLink()) throw new Error("native session path is a symbolic link");
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    if (info.dev !== before.dev || info.ino !== before.ino) throw new Error("native session changed while opening");
+    if (!info.isFile() || info.uid !== currentUid() || (info.mode & 0o022) !== 0 || info.nlink !== 1) throw new Error("native session file is not integrity-safe");
+    const buffer = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const end = buffer.subarray(0, bytesRead).indexOf(10);
+    if (end < 0) throw new Error("native session header is incomplete");
+    let header: unknown;
+    try { header = JSON.parse(buffer.toString("utf8", 0, end)); } catch { throw new Error("native session header is invalid"); }
+    if (!record(header) || header.type !== "session" || header.version !== 3 || typeof header.id !== "string" || !nativeSessionIdPattern.test(header.id)) throw new Error("native session header is unsupported");
+    const after = await lstat(path);
+    if (after.dev !== info.dev || after.ino !== info.ino || after.isSymbolicLink()) throw new Error("native session path changed while observed");
+    return { id: header.id, device: info.dev, inode: info.ino };
+  } finally { await handle.close(); }
+}
+async function observeNativeSession(current: ActiveSession): Promise<NativeSessionObservation> {
+  const file = current.context.sessionManager.getSessionFile();
+  if (!file) throw new Error("native session path unavailable");
+  const parent = await realpath(dirname(file));
+  const sessionFile = await realpath(file).catch((error: unknown) => {
+    if (record(error) && error.code === "ENOENT") return join(parent, file.slice(file.lastIndexOf("/") + 1));
+    throw error;
+  });
+  const sessionId = current.context.sessionManager.getSessionId();
+  if (!sessionId || sessionId !== current.sessionId) throw new Error("native session identity changed");
+  const native: NativeSessionObservation = { schema: 1, job_id: current.status.job_id, owner: current.status.owner, session_id: sessionId, generation: current.generation, process: current.pane, updated_at: new Date().toISOString(), session_file: sessionFile, cwd: current.context.cwd, state: "unpersisted" };
+  const header = await supportedSessionHeader(sessionFile);
+  if (header) {
+    if (header.id !== sessionId) throw new Error("native session header changed");
+    native.state = "persisted";
+    native.file = { device: header.device, inode: header.inode };
+    native.header_id = header.id;
+  }
+  return native;
+}
+function validNativeObservation(value: unknown): value is NativeSessionObservation {
+  if (!record(value) || value.schema !== 1 || typeof value.job_id !== "string" || !uuidPattern.test(value.job_id) || typeof value.owner !== "string" || !/^[0-9a-f]{16}$/.test(value.owner) || typeof value.session_id !== "string" || !nativeSessionIdPattern.test(value.session_id) || typeof value.generation !== "string" || !uuidPattern.test(value.generation) || !validProcessIdentity(value.process) || typeof value.updated_at !== "string" || !Number.isFinite(Date.parse(value.updated_at)) || typeof value.session_file !== "string" || !value.session_file.startsWith("/") || typeof value.cwd !== "string" || !value.cwd.startsWith("/")) return false;
+  const common = ["schema", "job_id", "owner", "session_id", "generation", "process", "updated_at", "session_file", "cwd", "state"];
+  if (value.state === "unpersisted") return exactKeys(value, common);
+  return value.state === "persisted" && exactKeys(value, [...common, "file", "header_id"]) && record(value.file) && exactKeys(value.file, ["device", "inode"]) && [value.file.device, value.file.inode].every((part) => typeof part === "number" && Number.isSafeInteger(part) && part >= 0) && value.header_id === value.session_id;
+}
+function sameHolderTuple(left: NativeSessionObservation, right: NativeSessionObservation): boolean {
+  return left.session_file === right.session_file && left.session_id === right.session_id && left.process.boot_id === right.process.boot_id && left.process.pid === right.process.pid && left.process.uid === right.process.uid && left.process.start_sec === right.process.start_sec && left.process.start_usec === right.process.start_usec && left.file?.device === right.file?.device && left.file?.inode === right.file?.inode;
+}
+async function publishNativeSession(current: ActiveSession): Promise<void> {
+  const observation = await observeNativeSession(current);
+  const historyPath = join(current.directory, "native-session-history.json");
+  let observations: NativeSessionObservation[] = [];
+  if (!(await pathMissing(historyPath))) {
+    const history = await privateRecord(historyPath);
+    if (!record(history) || !exactKeys(history, ["schema", "observations"]) || history.schema !== 1 || !Array.isArray(history.observations) || history.observations.length > 128 || !history.observations.every(validNativeObservation)) throw new Error("native session history is invalid");
+    observations = history.observations;
+  }
+  if (!observations.some((previous) => sameHolderTuple(previous, observation))) {
+    if (observations.length >= 128) throw new Error("native session history limit reached");
+    observations.push(observation);
+  }
+  const history = { schema: 1, observations };
+  if (Buffer.byteLength(`${JSON.stringify(history)}\n`, "utf8") > 512 * 1024) throw new Error("native session history size limit reached");
+  await atomicJson(historyPath, current.directory, history, "native-session-history");
+  await atomicJson(join(current.directory, "native-session.json"), current.directory, observation, "native-session");
+  current.nativeSession = observation;
+}
+function validManagedObservation(value: unknown): boolean {
+  if (!record(value) || !exactKeys(value, ["Launcher", "Current", "Package", "BinLink", "Entry", "Version"]) || value.Version !== "1.4.0") return false;
+  const validFile = (file: unknown): boolean => record(file) && exactKeys(file, ["Path", "Hash", "Size", "Mode", "UID", "Dev", "Ino"]) && typeof file.Path === "string" && file.Path.startsWith("/") && typeof file.Hash === "string" && /^[0-9a-f]{64}$/.test(file.Hash) && [file.Size, file.Mode, file.UID, file.Dev, file.Ino].every((field) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0);
+  const link = value.BinLink;
+  return validFile(value.Launcher) && validFile(value.Current) && validFile(value.Package) && validFile(value.Entry) && record(link) && exactKeys(link, ["Path", "Target", "UID", "Dev", "Ino"]) && typeof link.Path === "string" && link.Path.startsWith("/") && typeof link.Target === "string" && [link.UID, link.Dev, link.Ino].every((field) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0);
+}
 async function privateDirectory(path: string): Promise<boolean> {
   try {
     const info = await lstat(path);
@@ -63,7 +163,7 @@ async function privateDirectory(path: string): Promise<boolean> {
     return uid !== undefined && info.isDirectory() && !info.isSymbolicLink() && info.uid === uid && (info.mode & 0o777) === 0o700;
   } catch { return false; }
 }
-function validProcessIdentity(value: unknown, pid?: number): value is JsonRecord {
+function validProcessIdentity(value: unknown, pid?: number): value is ProcessIdentity {
   const uid = currentUid();
   return uid !== undefined && record(value) && exactKeys(value, ["boot_id", "pid", "uid", "start_sec", "start_usec"]) && typeof value.boot_id === "string" && bootIdPattern.test(value.boot_id) && typeof value.pid === "number" && Number.isInteger(value.pid) && (pid === undefined || value.pid === pid) && typeof value.uid === "number" && Number.isInteger(value.uid) && value.uid === uid && typeof value.start_sec === "number" && Number.isInteger(value.start_sec) && value.start_sec > 0 && typeof value.start_usec === "number" && Number.isInteger(value.start_usec) && value.start_usec >= 0 && value.start_usec < 1_000_000;
 }
@@ -81,6 +181,15 @@ async function syncDirectory(path: string): Promise<void> {
   const handle = await open(path, constants.O_RDONLY);
   try { await handle.sync(); } finally { await handle.close(); }
 }
+async function atomicJson(path: string, directory: string, value: unknown, prefix: string): Promise<void> {
+  const temp = join(directory, `.${prefix}-${randomUUID()}`);
+  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { await handle.writeFile(`${JSON.stringify(value)}\n`); await handle.sync(); }
+  catch (error) { await handle.close(); await unlink(temp).catch(() => undefined); throw error; }
+  await handle.close();
+  await rename(temp, path);
+  await syncDirectory(directory);
+}
 async function atomicStatus(path: string, directory: string, status: SessionStatus): Promise<void> {
   const temp = join(directory, `.session-${randomUUID()}`);
   const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -97,7 +206,7 @@ async function atomicStatus(path: string, directory: string, status: SessionStat
   await syncDirectory(directory);
 }
 
-export async function verifyInheritedJob(): Promise<{ id: string; owner: string; socketPath: string; directory: string; requestsPath: string } | undefined> {
+export async function verifyInheritedJob(): Promise<{ id: string; owner: string; socketPath: string; directory: string; requestsPath: string; protocol: "1" | "2"; pane: ProcessIdentity } | undefined> {
   const id = process.env.AC_JOB;
   const owner = process.env.AC_OWNER;
   const state = process.env.AC_STATE_DIR;
@@ -113,7 +222,12 @@ export async function verifyInheritedJob(): Promise<{ id: string; owner: string;
     const manifest = await privateRecord(join(directory, "manifest.json"));
     const launch = await privateRecord(join(directory, "launch.json"));
     const manifestKeys = ["schema", "id", "name", "owner", "cwd", "pi", "tmux", "coordinator", "created", "boot_id", "boot_id_scheme", "protocol", "socket"];
-    if (!record(ownerRecord) || !exactKeys(ownerRecord, ["schema", "token"]) || ownerRecord.schema !== 1 || ownerRecord.token !== owner || !record(manifest) || !exactKeys(manifest, manifestKeys) || manifest.schema !== 1 || manifest.id !== id || typeof manifest.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(manifest.name) || manifest.owner !== owner || manifest.protocol !== "1" || typeof manifest.cwd !== "string" || !manifest.cwd.startsWith("/") || typeof manifest.pi !== "string" || !manifest.pi.startsWith("/") || typeof manifest.tmux !== "string" || !manifest.tmux.startsWith("/") || typeof manifest.coordinator !== "string" || !manifest.coordinator.startsWith("/") || typeof manifest.created !== "string" || !Number.isFinite(Date.parse(manifest.created)) || manifest.boot_id_scheme !== bootIdScheme || typeof manifest.boot_id !== "string" || !bootIdPattern.test(manifest.boot_id) || typeof manifest.socket !== "string" || !record(launch) || Object.keys(launch).some((key) => !["schema", "phase", "server", "pane", "error", "retired"].includes(key)) || launch.schema !== 1 || launch.phase !== "exec-intent" || launch.retired === true || !validProcessIdentity(launch.pane, process.pid) || !validProcessIdentity(launch.server) || launch.pane.boot_id !== manifest.boot_id || launch.server.boot_id !== manifest.boot_id) return undefined;
+    if (!record(ownerRecord) || !exactKeys(ownerRecord, ["schema", "token"]) || ownerRecord.schema !== 1 || ownerRecord.token !== owner || !record(manifest) || !exactKeys(manifest, manifestKeys) || manifest.schema !== 1 || manifest.id !== id || typeof manifest.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,47}$/.test(manifest.name) || manifest.owner !== owner || (manifest.protocol !== "1" && manifest.protocol !== "2") || typeof manifest.cwd !== "string" || !manifest.cwd.startsWith("/") || typeof manifest.pi !== "string" || !manifest.pi.startsWith("/") || typeof manifest.tmux !== "string" || !manifest.tmux.startsWith("/") || typeof manifest.coordinator !== "string" || !manifest.coordinator.startsWith("/") || typeof manifest.created !== "string" || !Number.isFinite(Date.parse(manifest.created)) || manifest.boot_id_scheme !== bootIdScheme || typeof manifest.boot_id !== "string" || !bootIdPattern.test(manifest.boot_id) || typeof manifest.socket !== "string" || !record(launch) || Object.keys(launch).some((key) => !["schema", "phase", "server", "pane", "error", "retired"].includes(key)) || launch.schema !== 1 || launch.phase !== "exec-intent" || launch.retired === true || !validProcessIdentity(launch.pane, process.pid) || !validProcessIdentity(launch.server) || launch.pane.boot_id !== manifest.boot_id || launch.server.boot_id !== manifest.boot_id) return undefined;
+    if (manifest.protocol === "2") {
+      const intent = await privateRecord(join(directory, "intent.json"));
+      const roleRecord = await privateRecord(join(directory, "role.json"));
+      if (!record(intent) || !exactKeys(intent, ["schema", "kind", "terminal_profile", "argv_sha256", "native_pi"]) || intent.schema !== 1 || intent.kind !== "interactive" || intent.terminal_profile !== "transparent-v1" || typeof intent.argv_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(intent.argv_sha256) || !record(intent.native_pi) || !exactKeys(intent.native_pi, ["Executable", "Observation"]) || typeof intent.native_pi.Executable !== "string" || !intent.native_pi.Executable.startsWith("/") || !validManagedObservation(intent.native_pi.Observation) || !record(roleRecord) || !exactKeys(roleRecord, ["schema", "role"]) || roleRecord.schema !== 1 || (roleRecord.role !== "standalone" && roleRecord.role !== "manager-host") || !(await pathMissing(join(directory, "initial-task.txt"))) || !(await pathMissing(join(directory, "launch-argv.json")))) return undefined;
+    } else if (!(await pathMissing(join(directory, "intent.json")))) return undefined;
     const socketPath = await realpath(dirname(manifest.socket)).then((path) => join(path, "control"));
     const socketRoot = join(await realpath("/tmp"), `ac-${uid}-${owner}`);
     const expectedDir = join(socketRoot, id);
@@ -124,7 +238,7 @@ export async function verifyInheritedJob(): Promise<{ id: string; owner: string;
     const requestsPath = join(directory, "control-requests");
     await mkdir(requestsPath, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     if (!(await privateDirectory(requestsPath))) return undefined;
-    return { id, owner, socketPath, directory, requestsPath };
+    return { id, owner, socketPath, directory, requestsPath, protocol: manifest.protocol, pane: launch.pane };
   } catch { return undefined; }
 }
 
@@ -201,8 +315,11 @@ export function registerSessionControl(pi: Pick<ExtensionAPI, "on" | "sendUserMe
     const current = active;
     current.status.updated_at = Date.now();
     current.writes = current.writes.then(async () => {
-      if (active === current) await atomicStatus(current.statusPath, current.directory, current.status);
-    }).catch(() => { current.persistenceFailed = true; });
+      if (active === current && !current.persistenceFailed && !current.stopping) {
+        if (current.protocol === "2") await publishNativeSession(current);
+        if (!current.persistenceFailed && !current.stopping) await atomicStatus(current.statusPath, current.directory, current.status);
+      }
+    }).catch(async () => { current.persistenceFailed = true; current.stopping = true; await invalidateStatus(current); });
     return current.writes;
   };
   pi.on("session_start", async (_event, context) => {
@@ -212,7 +329,7 @@ export function registerSessionControl(pi: Pick<ExtensionAPI, "on" | "sendUserMe
     const sessionId = context.sessionManager.getSessionId();
     if (!sessionId) return;
     const generation = randomUUID();
-    const status: SessionStatus = { protocol: controlProtocol, job_id: inherited.id, owner: inherited.owner, session_id: sessionId, generation, pid: process.pid, updated_at: Date.now(), activity: "unknown" };
+    const status: SessionStatus = { protocol: controlProtocol, job_id: inherited.id, owner: inherited.owner, session_id: sessionId, generation, pid: process.pid, updated_at: Date.now(), activity: "unknown", ...(inherited.protocol === "2" ? { launch_protocol: "2" as const } : {}) };
     const server = createServer({ allowHalfOpen: true }, (socket) => serveConnection(socket));
     const current: ActiveSession = { ...inherited, generation, sessionId, status, statusPath: join(inherited.directory, "session.json"), server, heartbeat: setInterval(() => { void update(() => {}); }, 2000), writes: Promise.resolve(), context, stopping: false, persistenceFailed: false };
     active = current;
@@ -232,7 +349,29 @@ export function registerSessionControl(pi: Pick<ExtensionAPI, "on" | "sendUserMe
   pi.on("agent_settled", () => { void update((status) => { updateObservedActivity(status, "idle"); }); });
   pi.on("ui_prompt_start", (event) => { void update((status) => { updateObservedPrompt(status, observePrompt(event.kind, event.title)); }); });
   pi.on("ui_prompt_end", () => { void update((status) => { updateObservedPrompt(status, undefined); }); });
-  pi.on("session_shutdown", async () => { if (active) { const current = active; await shutdown(current); if (active === current) active = undefined; } });
+  pi.on("session_before_switch", async (event) => {
+    if (active?.protocol === "2" && event.reason === "resume") return { cancel: true };
+  });
+  pi.on("session_before_fork", async (_event, context) => {
+    const current = active;
+    if (current?.protocol !== "2") return;
+    const source = context.sessionManager.getSessionFile();
+    const currentSource = current.context.sessionManager.getSessionFile();
+    if (!source || !currentSource || resolve(source) !== resolve(currentSource)) return { cancel: true };
+    try {
+      const observed = current.nativeSession;
+      const resolvedSource = await realpath(source);
+      const sourceHeader = await supportedSessionHeader(source);
+      if (!observed || observed.state !== "persisted" || observed.session_file !== resolvedSource || observed.session_id !== current.sessionId || sourceHeader?.id !== current.sessionId || sourceHeader.device !== observed.file?.device || sourceHeader.inode !== observed.file?.inode || current.context.sessionManager.getSessionId() !== current.sessionId) {
+        if (active === current) { current.persistenceFailed = true; current.stopping = true; await invalidateStatus(current); }
+        return { cancel: true };
+      }
+    } catch {
+      if (active === current) { current.persistenceFailed = true; current.stopping = true; await invalidateStatus(current); }
+      return { cancel: true };
+    }
+  });
+  pi.on("session_shutdown", async () => { if (active) { active.stopping = true; const current = active; await shutdown(current); if (active === current) active = undefined; } });
 
   function serveConnection(socket: Socket): void {
     let bytes = Buffer.alloc(0);
@@ -279,17 +418,30 @@ export function registerSessionControl(pi: Pick<ExtensionAPI, "on" | "sendUserMe
     else socket.end(errorResponse(result.error ?? "control_failed", result.error === "stale_target" ? "target changed" : "control request rejected"));
   }
   return {
-    status: () => active ? structuredClone(active.status) : undefined,
-    report: async (summary, attention) => {
-      if (!active || !updateAgentReport(active.status, summary, attention)) return undefined;
+    publishStatus: async () => {
       const current = active;
-      current.writes = current.writes.then(() => atomicStatus(current.statusPath, current.directory, current.status)).catch(() => { current.persistenceFailed = true; });
-      await current.writes;
-      return current.persistenceFailed ? undefined : structuredClone(current.status);
+      if (!current || current.persistenceFailed || current.stopping) return undefined;
+      await update(() => {});
+      return active === current && !current.persistenceFailed && !current.stopping ? structuredClone(current.status) : undefined;
+    },
+    status: () => active && !active.persistenceFailed && !active.stopping ? structuredClone(active.status) : undefined,
+    report: async (summary, attention) => {
+      if (!active || active.persistenceFailed || active.stopping || !updateAgentReport(active.status, summary, attention)) return undefined;
+      const current = active;
+      await update(() => {});
+      return active === current && !current.persistenceFailed && !current.stopping ? structuredClone(current.status) : undefined;
     },
   };
 }
 
+async function invalidateStatus(current: ActiveSession): Promise<void> {
+  try {
+    const before = await lstat(current.statusPath);
+    const value = await privateRecord(current.statusPath);
+    const after = await lstat(current.statusPath);
+    if (record(value) && value.generation === current.generation && before.dev === after.dev && before.ino === after.ino) await unlink(current.statusPath);
+  } catch { /* A replacement status or missing path is not ours to remove. */ }
+}
 function shutdown(current: ActiveSession): Promise<void> {
   if (current.cleanup) return current.cleanup;
   current.stopping = true;

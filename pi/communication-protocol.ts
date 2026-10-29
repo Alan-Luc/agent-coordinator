@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { controlReceiptSchema, jobFactsSchema, processIdentitySchema, sessionStatusSchema, sessionTargetSchema } from "./control-protocol.ts";
+import { awaitingConversationSchema } from "./manager-host-protocol.ts";
 
 export const communicationProtocol = 1;
 export const maxPublicationBytes = 4096;
@@ -70,6 +71,7 @@ export const communicationResultSchemas = [
   Type.Object({ message: communicationMessageSchema }, strict),
   Type.Object({ receipt: controlReceiptSchema }, strict),
   Type.Object({ started: jobFactsSchema }, strict),
+  awaitingConversationSchema,
 ] as const;
 export const communicationResultSchema = Type.Union([...communicationResultSchemas]);
 export type CommunicationResult = Static<typeof communicationResultSchema>;
