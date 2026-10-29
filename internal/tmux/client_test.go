@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrivateServerCreateInspectRemove(t *testing.T) {
@@ -85,6 +86,92 @@ func checkPrivateServerCreateInspectRemove(t *testing.T) {
 	}
 }
 
+func TestTransparentConfigLoadsWithoutErrors(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux unavailable")
+	}
+	root, err := os.MkdirTemp("/tmp", "ac-config-load-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "socket")
+	config := filepath.Join(root, "tmux.conf")
+	if err := os.WriteFile(config, []byte(TransparentConfig("owner", "job123")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: tmuxPath}
+	if _, err := client.command(context.Background(), "-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", "config-test", "/bin/sleep 60"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "config-test") })
+	if output, err := client.command(context.Background(), "-S", socket, "-N", "source-file", config); err != nil {
+		t.Fatalf("first config load must not produce an attach error pager: %q, %v", output, err)
+	}
+}
+
+func TestTransparentViewsShareOnePaneAndRefuseBystanders(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux unavailable")
+	}
+	root, err := os.MkdirTemp("/tmp", "ac-transparent-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "socket")
+	config := filepath.Join(root, "tmux.conf")
+	if err := os.WriteFile(config, []byte(TransparentConfig("owner", "job123")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(root, "sleep")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\\nexec /bin/sleep 60\\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: tmuxPath}
+	if err := client.Create(context.Background(), CreateOptions{Socket: socket, Config: config, Session: "initial", Executable: launcher, JobID: "job123", RuntimeDir: root, Env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TERM=xterm-256color"}, Width: 80, Height: 24}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "return") })
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "initial") })
+	if err := client.CreateReturnView(context.Background(), socket, "initial", "return"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.InspectTransparent(context.Background(), socket, "initial", "return")
+	if err != nil || snapshot.Protocol != "2" || snapshot.PaneID == "" {
+		t.Fatalf("transparent inspection = %+v, %v", snapshot, err)
+	}
+	keys, err := client.command(context.Background(), "-S", socket, "-N", "list-keys", "-T", "ac-return")
+	if err != nil || strings.TrimSpace(string(keys)) != "bind-key -T ac-return F12 detach-client" {
+		t.Fatalf("return keys = %q, %v", keys, err)
+	}
+	if _, err := client.command(context.Background(), "-S", socket, "-N", "list-keys", "-T", "root", "F12"); err == nil {
+		t.Fatal("initial view intercepted F12")
+	}
+	keyTable, err := client.command(context.Background(), "-S", socket, "-N", "show-option", "-t", "return", "key-table")
+	if err != nil || strings.TrimSpace(string(keyTable)) != "key-table ac-return" {
+		t.Fatalf("return session key table = %q, %v", keyTable, err)
+	}
+	if snapshot.Clients != 0 {
+		t.Fatalf("unexpected aggregate clients: %d", snapshot.Clients)
+	}
+	if _, err := client.command(context.Background(), "-S", socket, "-N", "new-session", "-d", "-s", "bystander"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.InspectTransparent(context.Background(), socket, "initial", "return"); err == nil {
+		t.Fatal("accepted bystander session")
+	}
+	_, _ = client.command(context.Background(), "-S", socket, "-N", "kill-session", "-t", "=bystander")
+	if _, err := client.command(context.Background(), "-S", socket, "-N", "new-window", "-d", "-t", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.InspectTransparent(context.Background(), socket, "initial", "return"); err == nil {
+		t.Fatal("accepted an extra window")
+	}
+}
+
 func TestCaptureUsesPaneTargetWithoutChangingGeometry(t *testing.T) {
 	root := t.TempDir()
 	capture := filepath.Join(root, "argv")
@@ -104,6 +191,90 @@ func TestCaptureUsesPaneTargetWithoutChangingGeometry(t *testing.T) {
 	}
 	if strings.TrimSpace(string(argv)) != "-S\n/private/socket\n-N\ncapture-pane\n-p\n-e\n-t\n%7" {
 		t.Fatalf("capture argv = %q", argv)
+	}
+}
+
+func TestCaptureTailUsesBoundedHistoryRange(t *testing.T) {
+	root := t.TempDir()
+	capture := filepath.Join(root, "argv")
+	fakeTmux := filepath.Join(root, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nprintf 'tail output\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: fakeTmux}
+	t.Setenv("CAPTURE", capture)
+	got, err := client.CaptureTail(context.Background(), "/private/socket", "%7", 25)
+	if err != nil || got != "tail output\n" {
+		t.Fatalf("CaptureTail() = %q, %v", got, err)
+	}
+	argv, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-S\n/private/socket\n-N\ncapture-pane\n-p\n-e\n-S\n-25\n-E\n-1\n-t\n%7"
+	if strings.TrimSpace(string(argv)) != want {
+		t.Fatalf("CaptureTail argv = %q; want %q", argv, want)
+	}
+}
+
+func TestCaptureTailRejectsUnboundedLineLimits(t *testing.T) {
+	for _, maxLines := range []int{-1, 0, MaxCaptureTailLines + 1} {
+		if _, err := (Client{}).CaptureTail(context.Background(), "/socket", "%1", maxLines); err == nil {
+			t.Errorf("CaptureTail accepted maxLines=%d", maxLines)
+		}
+	}
+	if _, err := (Client{}).CaptureTail(context.Background(), "", "%1", 1); err == nil {
+		t.Fatal("CaptureTail accepted an empty socket")
+	}
+}
+
+func TestCaptureTailReadsPriorOutputAfterPaneExitWithoutChangingVisibleCapture(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux unavailable")
+	}
+	root, err := os.MkdirTemp("/tmp", "ac-capture-tail-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "socket")
+	config := filepath.Join(root, "tmux.conf")
+	if err := os.WriteFile(config, []byte(Config("owner", "job123", "tail-test")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(root, "exit")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nprintf 'early diagnostic marker\\n'\nexit 7\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{Executable: tmuxPath}
+	if err := client.Create(context.Background(), CreateOptions{Socket: socket, Config: config, Session: "ac-job123", Executable: launcher, JobID: "job123", RuntimeDir: root, Env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TERM=xterm-256color"}, Width: 80, Height: 24}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "ac-job123") })
+	deadline := time.Now().Add(3 * time.Second)
+	var before Snapshot
+	for time.Now().Before(deadline) {
+		before, err = client.Inspect(context.Background(), socket, "ac-job123")
+		if err == nil && before.PaneDead {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil || !before.PaneDead {
+		t.Fatalf("fixture pane did not exit: %+v, %v", before, err)
+	}
+	tail, err := client.CaptureTail(context.Background(), socket, before.PaneID, 25)
+	if err != nil || !strings.Contains(tail, "early diagnostic marker") {
+		t.Fatalf("history tail = %q, %v", tail, err)
+	}
+	visible, err := client.Capture(context.Background(), socket, before.PaneID)
+	if err != nil || !strings.Contains(visible, "Pane is dead") {
+		t.Fatalf("visible capture behavior changed: %q, %v", visible, err)
+	}
+	after, err := client.Inspect(context.Background(), socket, "ac-job123")
+	if err != nil || before.Width != after.Width || before.Height != after.Height {
+		t.Fatalf("capture changed geometry: before=%+v after=%+v err=%v", before, after, err)
 	}
 }
 

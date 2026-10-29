@@ -42,6 +42,105 @@ func (c Client) Create(ctx context.Context, o CreateOptions) error {
 	return nil
 }
 
+func (c Client) CreateReturnView(ctx context.Context, socket, initialSession, returnSession string) error {
+	if socket == "" || initialSession == "" || returnSession == "" || initialSession == returnSession {
+		return fmt.Errorf("invalid transparent view targets")
+	}
+	initial, err := c.Inspect(ctx, socket, initialSession)
+	if err != nil {
+		return fmt.Errorf("invalid transparent initial session: %w", err)
+	}
+	if initial.Protocol != "2" {
+		return fmt.Errorf("invalid transparent initial protocol %q", initial.Protocol)
+	}
+	if _, err := c.command(ctx, "-S", socket, "-N", "new-session", "-d", "-t", initialSession, "-s", returnSession); err != nil {
+		return fmt.Errorf("tmux return view creation failed")
+	}
+	if _, err := c.command(ctx, "-S", socket, "-N", "bind-key", "-T", "ac-return", "F12", "detach-client"); err != nil {
+		return fmt.Errorf("tmux return key binding setup failed: %w", err)
+	}
+	if _, err := c.command(ctx, "-S", socket, "-N", "set-option", "-t", returnSession, "key-table", "ac-return"); err != nil {
+		return fmt.Errorf("tmux return key table setup failed: %w", err)
+	}
+	return nil
+}
+
+func (c Client) InspectTransparent(ctx context.Context, socket, initialSession, returnSession string) (Snapshot, error) {
+	var empty Snapshot
+	if socket == "" || initialSession == "" || returnSession == "" || initialSession == returnSession {
+		return empty, fmt.Errorf("invalid transparent inspect target")
+	}
+	initial, err := c.Inspect(ctx, socket, initialSession)
+	if err != nil || initial.Protocol != "2" {
+		return empty, fmt.Errorf("invalid transparent initial session")
+	}
+	returned, err := c.Inspect(ctx, socket, returnSession)
+	if err != nil || returned.Owner != initial.Owner || returned.Job != initial.Job || returned.Protocol != "2" {
+		return empty, fmt.Errorf("transparent view ownership mismatch")
+	}
+	out, err := c.command(ctx, "-S", socket, "-N", "list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return empty, fmt.Errorf("tmux session topology inspection failed")
+	}
+	sessions := strings.Fields(string(out))
+	if len(sessions) != 2 || !contains(sessions, initialSession) || !contains(sessions, returnSession) {
+		return empty, fmt.Errorf("unexpected transparent sessions")
+	}
+	out, err = c.command(ctx, "-S", socket, "-N", "list-panes", "-a", "-F", "#{session_name}|#{window_id}|#{pane_id}")
+	if err != nil {
+		return empty, fmt.Errorf("tmux pane topology inspection failed")
+	}
+	panes := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(panes) != 2 {
+		return empty, fmt.Errorf("unexpected transparent pane count")
+	}
+	shared := ""
+	for _, pane := range panes {
+		fields := strings.Split(pane, "|")
+		if len(fields) != 3 || (fields[0] != initialSession && fields[0] != returnSession) || fields[1] == "" || fields[2] == "" {
+			return empty, fmt.Errorf("unexpected transparent pane topology")
+		}
+		identity := fields[1] + "|" + fields[2]
+		if shared != "" && shared != identity {
+			return empty, fmt.Errorf("transparent views do not share one pane")
+		}
+		shared = identity
+	}
+	if !strings.Contains(string(out), initialSession+"|") || !strings.Contains(string(out), returnSession+"|") || initial.PaneID != returned.PaneID || initial.ServerPID != returned.ServerPID || initial.PanePID != returned.PanePID {
+		return empty, fmt.Errorf("transparent views do not share one pane")
+	}
+	out, err = c.command(ctx, "-S", socket, "-N", "list-windows", "-a", "-F", "#{session_name}|#{window_id}")
+	if err != nil {
+		return empty, fmt.Errorf("tmux window topology inspection failed")
+	}
+	windows := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(windows) != 2 {
+		return empty, fmt.Errorf("unexpected transparent window count")
+	}
+	windowIDs := make(map[string]string, 2)
+	for _, window := range windows {
+		fields := strings.Split(window, "|")
+		if len(fields) != 2 || (fields[0] != initialSession && fields[0] != returnSession) || fields[1] == "" || windowIDs[fields[0]] != "" {
+			return empty, fmt.Errorf("unexpected transparent window topology")
+		}
+		windowIDs[fields[0]] = fields[1]
+	}
+	if windowIDs[initialSession] == "" || windowIDs[initialSession] != windowIDs[returnSession] {
+		return empty, fmt.Errorf("transparent views do not share one window")
+	}
+	initial.Clients += returned.Clients
+	return initial, nil
+}
+
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
 func (c Client) Inspect(ctx context.Context, socket, session string) (Snapshot, error) {
 	if socket == "" || session == "" {
 		return Snapshot{}, fmt.Errorf("invalid tmux inspect target")
@@ -108,6 +207,19 @@ func (c Client) AttachCommand(ctx context.Context, socket, session string, obser
 	return cmd
 }
 
+const MaxCaptureTailLines = 10000
+
+func (c Client) CaptureTail(ctx context.Context, socket, paneID string, maxLines int) (string, error) {
+	if socket == "" || paneID == "" || maxLines < 1 || maxLines > MaxCaptureTailLines {
+		return "", fmt.Errorf("invalid tmux capture tail target or line limit")
+	}
+	out, err := c.command(ctx, "-S", socket, "-N", "capture-pane", "-p", "-e", "-S", "-"+strconv.Itoa(maxLines), "-E", "-1", "-t", paneID)
+	if err != nil {
+		return "", fmt.Errorf("tmux pane history capture failed")
+	}
+	return string(out), nil
+}
+
 func (c Client) Capture(ctx context.Context, socket, paneID string) (string, error) {
 	if socket == "" || paneID == "" {
 		return "", fmt.Errorf("invalid tmux capture target")
@@ -138,5 +250,11 @@ func (c Client) executable() string {
 
 func (c Client) command(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, c.executable(), args...)
-	return cmd.Output()
+	out, err := cmd.Output()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) > 0 {
+			return out, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exit.Stderr)))
+		}
+	}
+	return out, err
 }
