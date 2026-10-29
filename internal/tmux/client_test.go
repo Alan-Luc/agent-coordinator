@@ -228,6 +228,34 @@ func TestTransparentPaneExitDetachesBothViews(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	if _, err := client.command(context.Background(), "-S", socket, "-N", "new-session", "-d", "-s", "bystander", "/bin/true"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Remove(context.Background(), socket, "bystander") })
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		bystander, err := client.Inspect(context.Background(), socket, "bystander")
+		if err == nil && bystander.PaneDead {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bystander did not exit: %+v, %v", bystander, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, done := range clients {
+		select {
+		case err := <-done:
+			t.Fatalf("unrelated pane exit detached a Pi client: %v", err)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+	if _, err := client.InspectTransparent(context.Background(), socket, "ac-job123", "ac-return-job123"); err == nil {
+		t.Fatal("accepted extra tmux objects on private server")
+	}
+	if err := client.Remove(context.Background(), socket, "bystander"); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(exitFile, nil, 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -53,6 +53,9 @@ func (c Client) CreateReturnView(ctx context.Context, socket, initialSession, re
 	if initial.Protocol != "2" {
 		return fmt.Errorf("invalid transparent initial protocol %q", initial.Protocol)
 	}
+	if _, err := c.command(ctx, "-S", socket, "-N", "set-hook", "-p", "-t", initial.PaneID, "pane-died", "detach-client -s ="+initialSession+" ; detach-client -s ="+returnSession); err != nil {
+		return fmt.Errorf("tmux pane exit hook setup failed: %w", err)
+	}
 	if _, err := c.command(ctx, "-S", socket, "-N", "new-session", "-d", "-t", initialSession, "-s", returnSession); err != nil {
 		return fmt.Errorf("tmux return view creation failed")
 	}

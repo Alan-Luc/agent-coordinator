@@ -65,6 +65,9 @@ Support limits:
 - Taskless `manage on` waits for a deliberately persisted conversation before
   enrollment/delivery. Manager-host identity stays reserved even after manage-off;
   that runtime cannot later become another manager's worker.
+- The hidden tmux server is reserved for Pi's two views. Tools needing tmux must
+  select a separate server (`tmux -L NAME ...`); extra sessions/windows/panes in
+  Pi's server make Enter/control fail closed. They are not removed automatically.
 - Enter must run outside tmux, including the wrapper's hidden runtime. From a
   wrapped Pi's tools, open another ordinary Kitty window instead; no nested or
   automatic GUI attachment is attempted. In-app resume/import remain cancelled
