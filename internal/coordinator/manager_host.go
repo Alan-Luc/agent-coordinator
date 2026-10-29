@@ -68,7 +68,7 @@ func (c *Coordinator) ReserveManagerHost(ctx context.Context, target SessionTarg
 	return role, nil
 }
 
-func (c *Coordinator) validateOwnedManagerCaller(ctx context.Context, caller CommunicationCaller, identity ProcessIdentity) error {
+func (c *Coordinator) validateOwnedManagerCaller(ctx context.Context, caller CommunicationCaller, identity ProcessIdentity, action string, managers []CommunicationManager) error {
 	ids, err := c.store.ids()
 	if err != nil {
 		return err
@@ -86,8 +86,24 @@ func (c *Coordinator) validateOwnedManagerCaller(ctx context.Context, caller Com
 		}
 		directory := filepath.Join(c.store.root, "jobs", id)
 		role, err := readJobRole(directory)
-		if err != nil || role.Role != "manager-host" {
+		if err != nil {
+			return actionError(1, "manager_host_unverified", "owned manager role cannot be verified", true, id, "")
+		}
+		if role.Role != "manager-host" {
+			enrolled := false
+			for _, manager := range managers {
+				if manager.SessionFile == caller.SessionFile && manager.SessionID == caller.SessionID {
+					enrolled = true
+					break
+				}
+			}
+			if action == "reconnect" && !enrolled {
+				continue
+			}
 			return actionError(1, "manager_host_required", "reserve this standalone runtime as a manager host first", false, id, "")
+		}
+		if action == "disconnect" {
+			continue
 		}
 		target, err := c.ControlTarget(ctx, id)
 		if err != nil || target.SessionID != caller.SessionID || !sameIdentity(target.Pane, identity) {

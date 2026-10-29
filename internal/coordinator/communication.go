@@ -237,7 +237,7 @@ func (c *Coordinator) Communication(ctx context.Context, r CommunicationRequest,
 		return CommunicationResult{}, err
 	}
 	if managerAction {
-		if err := c.validateOwnedManagerCaller(lockCtx, *r.Caller, identity); err != nil {
+		if err := c.validateOwnedManagerCaller(lockCtx, *r.Caller, identity, r.Action, s.Managers); err != nil {
 			return CommunicationResult{}, err
 		}
 	}
