@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "pi": {
-    "extensions": ["./pi/index.ts"]
+    "extensions": [
+      "./pi/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -15,9 +17,11 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "22.19.19",
-    "typebox": "1.3.27"
+    "typebox": "1.3.27",
+    "typescript": "5.9.3"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test pi/*.test.ts"
+    "test": "node --experimental-strip-types --test pi/*.test.ts",
+    "typecheck": "tsc --noEmit --strict --skipLibCheck --module nodenext --moduleResolution nodenext --allowImportingTsExtensions --target es2023 pi/*.ts"
   }
 }
