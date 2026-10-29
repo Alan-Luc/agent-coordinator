@@ -236,6 +236,11 @@ func (c *Coordinator) Communication(ctx context.Context, r CommunicationRequest,
 	if err != nil {
 		return CommunicationResult{}, err
 	}
+	if managerAction {
+		if err := c.validateOwnedManagerCaller(lockCtx, *r.Caller, identity); err != nil {
+			return CommunicationResult{}, err
+		}
+	}
 	if r.Action == "enroll" || r.Action == "reconnect" || r.Action == "pause" || r.Action == "disconnect" {
 		if err := validManagerConversation(*r.Caller); err != nil {
 			return CommunicationResult{}, actionError(1, "invalid_manager", "manager conversation is not persisted and verified", false, "", "")
@@ -601,6 +606,22 @@ func (c *Coordinator) Communication(ctx context.Context, r CommunicationRequest,
 		fresh, e := c.ControlTarget(ctx, r.JobID)
 		if e != nil || !sameTarget(fresh, *r.Target) {
 			return CommunicationResult{}, actionError(1, "identity_changed", "confirmed worker target changed", true, r.JobID, "")
+		}
+		if !manager.Enabled {
+			return CommunicationResult{}, actionError(1, "manager_paused", "enable manager delivery before adopting a worker", false, r.JobID, "")
+		}
+		if manager.Lease != nil && sameIdentity(fresh.Pane, manager.Lease.Process) {
+			return CommunicationResult{}, actionError(1, "self_adoption", "a manager cannot adopt its own runtime", false, r.JobID, "")
+		}
+		manifest, _, loadErr := c.store.load(r.JobID)
+		if loadErr != nil {
+			return CommunicationResult{}, loadErr
+		}
+		if manifest.Protocol == InteractiveProtocolVersion {
+			role, roleErr := readJobRole(filepath.Join(c.store.root, "jobs", r.JobID))
+			if roleErr != nil || role.Role != "standalone" {
+				return CommunicationResult{}, actionError(1, "manager_host", "a reserved manager host cannot be adopted as a worker", false, r.JobID, "")
+			}
 		}
 		for _, b := range s.Bindings {
 			if b.JobID == r.JobID {
