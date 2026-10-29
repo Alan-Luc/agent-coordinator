@@ -20,6 +20,12 @@ func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 func run(args []string, in *os.File, out, errOut io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if len(args) > 0 && args[0] == "pi" {
+		return runPi(ctx, args[1:], in, out, errOut)
+	}
+	if len(args) > 0 && args[0] == "_features" {
+		return runLaunchFeatures(args, out, errOut)
+	}
 	jsonMode := false
 	for _, arg := range args {
 		if arg == "--json" {
@@ -82,6 +88,9 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 	}
 	if len(args) > 0 && args[0] == "_communication" {
 		return runCommunicationBody(ctx, c, args, communicationBody, out, fail, invalid)
+	}
+	if len(args) > 0 && args[0] == "_manager-host" {
+		return runManagerHost(ctx, c, args, in, out, fail, invalid)
 	}
 	if len(args) > 0 && (strings.HasPrefix(args[0], "_") || args[0] == "send" || args[0] == "stop" || args[0] == "force-stop") {
 		return runControl(ctx, c, args, in, out, errOut, fail, invalid)

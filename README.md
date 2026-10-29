@@ -20,6 +20,61 @@ agent-coordinator
 The coordinator executable must have an absolute path containing only letters,
 digits, `_`, `.`, `/`, and `-`, to avoid tmux command-parser ambiguity.
 
+## Start interactive Pi with an independent lifetime
+
+```sh
+agent-coordinator pi
+agent-coordinator pi --model MODEL @image.png
+```
+
+In an ordinary Kitty shell, this starts Pi in a private owned terminal runtime.
+Closing that Kitty client leaves the same Pi running; open `agent-coordinator`
+from another ordinary Kitty shell and press Enter to reconnect. You do not need
+any tmux commands. Kitty still owns its windows, tabs and splits. This applies
+only to future wrapped starts, not already-running unwrapped Pi.
+
+Activation is opt-in. After building and separately enabling the compatible Pi
+extension, you can add this interactive-shell alias yourself:
+
+```sh
+alias pi='/absolute/path/to/agent-coordinator pi'
+```
+
+No installer changes your shell, Pi, Kitty or global tmux settings. Roll back by
+removing that alias (`unalias pi` in the current shell); retained jobs stay
+available through coordinator. `command pi` explicitly bypasses the wrapper.
+Scripts and absolute native invocations are outside its persistence guarantees.
+
+Support limits:
+- Wrapped invocation requires Kitty TTY input/output, the recognized managed
+  Pi 1.4.0 launcher and supported native argument grammar. Unknown extension
+  flags, startup session pickers/continue/IDs/fork and malformed arguments refuse
+  before creating coordinator state. Use native bypass when those are needed.
+- Noninteractive/piped modes, help/version and maintenance commands execute Pi
+  directly. `--api-key`, `--no-session` and `--no-extensions`/`-ne` also bypass;
+  they do not create a retained manageable runtime.
+- Original-client F12 and Ctrl+Z reach Pi. Coordinator Enter reserves F12 Return
+  for detaching only that client. Ctrl+Z stops Pi rather than returning to a shell;
+  use coordinator Continue from another ordinary window to recover.
+- Pi conversation/tool-output scrolling and file/clipboard image input are
+  required. Inline image previews and identical Kitty raw-terminal history are
+  not provided; generated image paths can be opened in macOS Preview.
+- Missing/stale compatible adapter status means terminal-only/control-unverified:
+  Enter and native quit remain available, but manage/adopt/message refuse. No
+  automatic reload or replacement Pi is launched.
+- Taskless `manage on` waits for a deliberately persisted conversation before
+  enrollment/delivery. Manager-host identity stays reserved even after manage-off;
+  that runtime cannot later become another manager's worker.
+- Enter must run outside tmux, including the wrapper's hidden runtime. From a
+  wrapped Pi's tools, open another ordinary Kitty window instead; no nested or
+  automatic GUI attachment is attempted. In-app resume/import remain cancelled
+  until the guarded exact-file path is available.
+
+Native quit really exits. A successful detach is not Pi completion; early-exit
+status and bounded diagnostics are reported only after owned-process proof.
+Uncertain launch/attachment leaves its UUID discoverable: inspect list/doctor,
+never automatically retry or start a replacement.
+
 ## Dashboard
 
 A dense session table sits beside **Observe · READ ONLY** at 72×16 and above.
