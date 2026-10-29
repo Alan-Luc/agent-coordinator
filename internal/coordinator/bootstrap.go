@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-coordinator/internal/pilaunch"
 	"golang.org/x/sys/unix"
 )
 
@@ -40,6 +41,9 @@ func RunBootstrap(ctx context.Context, id string) error {
 	if err != nil {
 		return errors.New("invalid bootstrap records")
 	}
+	if !supportedJobProtocol(m.Protocol) {
+		return errors.New("unsupported bootstrap protocol")
+	}
 	if l.Phase != "preexec" || l.Retired {
 		return errors.New("launch attempt already claimed or revoked")
 	}
@@ -67,10 +71,24 @@ func RunBootstrap(ctx context.Context, id string) error {
 		return fail()
 	}
 	job := filepath.Join(c.store.root, "jobs", id)
-	taskPath := filepath.Join(job, "initial-task.txt")
-	task, err := readPrivateBytes(taskPath, MaxTaskBytes+len(TaskHeader))
-	if err != nil || !strings.HasPrefix(string(task), TaskHeader) || validateTask(task[len(TaskHeader):]) != nil {
-		return fail()
+	var nativeArgv []string
+	consumeInteractivePayload := false
+	if m.Protocol == InteractiveProtocolVersion {
+		intent, intentErr := readInteractiveIntent(job)
+		if intentErr != nil || intent.NativePi.Executable != m.Pi || pilaunch.Recheck(*intent.NativePi) != nil {
+			return fail()
+		}
+		nativeArgv, err = readInteractiveArguments(job)
+		if err != nil {
+			return fail()
+		}
+		consumeInteractivePayload = true
+	} else {
+		taskPath := filepath.Join(job, "initial-task.txt")
+		task, taskErr := readPrivateBytes(taskPath, MaxTaskBytes+len(TaskHeader))
+		if taskErr != nil || !strings.HasPrefix(string(task), TaskHeader) || validateTask(task[len(TaskHeader):]) != nil {
+			return fail()
+		}
 	}
 	snap, err := c.ownedSnapshot(ctx, m)
 	if err != nil || snap.PanePID != os.Getpid() || snap.PaneID != os.Getenv("TMUX_PANE") || snap.PaneDead {
@@ -84,6 +102,11 @@ func RunBootstrap(ctx context.Context, id string) error {
 	if err != nil || pane.UID != uint32(os.Getuid()) || server.BootID != boot || pane.BootID != boot {
 		return fail()
 	}
+	if consumeInteractivePayload {
+		if err := os.Remove(filepath.Join(job, "launch-argv.json")); err != nil || syncDir(job) != nil {
+			return fail()
+		}
+	}
 	l = Launch{Schema: SchemaVersion, Phase: "exec-intent", Server: &server, Pane: &pane}
 	if err := writeJSON(job, "launch.json", l); err != nil {
 		return errors.New("cannot persist exec intent")
@@ -91,7 +114,12 @@ func RunBootstrap(ctx context.Context, id string) error {
 	release()
 	locked = false
 	if err = os.Chdir(m.Cwd); err == nil {
-		err = unix.Exec(m.Pi, []string{m.Pi, "--session-id", "ac-" + id, "--name", m.Name, "--", "@" + taskPath}, os.Environ())
+		if m.Protocol == InteractiveProtocolVersion {
+			nativeArgv = append([]string{m.Pi}, nativeArgv...)
+			err = unix.Exec(m.Pi, nativeArgv, interactiveLaunchEnvironmentFrom(os.Environ(), c.store.root, c.store.token, id))
+		} else {
+			err = unix.Exec(m.Pi, []string{m.Pi, "--session-id", "ac-" + id, "--name", m.Name, "--", "@" + filepath.Join(job, "initial-task.txt")}, os.Environ())
+		}
 	}
 	// An exec failure is definite only for the bootstrap that recorded this intent.
 	release, lockErr := c.store.lock(lockCtx, filepath.Join("jobs", id, "launch.lock"))

@@ -25,7 +25,7 @@ func (c *Coordinator) communicationWorkers(ctx context.Context, state communicat
 			continue
 		}
 		status, err := readSessionStatus(filepath.Join(c.store.root, "jobs", binding.JobID, "session.json"), now)
-		if err != nil || validateSessionStatus(status, binding.JobID, manifest.Owner, launch.Pane.PID, now) != nil {
+		if err != nil || c.validateJobSessionStatus(manifest, launch, status, now) != nil || status.SessionID != target.SessionID || status.Generation != target.Generation {
 			continue
 		}
 		workers = append(workers, sanitizeCommunicationStatus(status))

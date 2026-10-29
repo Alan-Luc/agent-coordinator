@@ -309,7 +309,46 @@ func (c *Coordinator) removeDeadSession(ctx context.Context, m Manifest, l *Laun
 			return err
 		}
 	}
-	return (tmux.Client{Executable: m.Tmux}).Remove(ctx, m.Socket, "ac-"+m.ID)
+	client := tmux.Client{Executable: m.Tmux}
+	if m.Protocol == InteractiveProtocolVersion {
+		if _, err := client.InspectTransparent(ctx, m.Socket, "ac-"+m.ID, "ac-return-"+m.ID); err != nil {
+			return err
+		}
+		if err := client.Remove(ctx, m.Socket, "ac-return-"+m.ID); err != nil {
+			return err
+		}
+		return client.Remove(ctx, m.Socket, "ac-"+m.ID)
+	}
+	return client.Remove(ctx, m.Socket, "ac-"+m.ID)
+}
+
+func (c *Coordinator) removeInteractiveResources(ctx context.Context, m Manifest, launch *Launch, snapshot tmux.Snapshot) error {
+	if err := c.removeDeadSession(ctx, m, launch, snapshot); err != nil {
+		return err
+	}
+	if err := removeEndedControlEndpoint(ctx, m, *launch); err != nil {
+		return err
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Lstat(m.Socket); errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err == nil {
+			if err := c.removeStaleSocket(ctx, m, *launch); err == nil {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return errors.New("owned terminal server did not stop after its sessions were removed")
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *Coordinator) removeStaleSocket(ctx context.Context, m Manifest, l Launch) error {
@@ -332,7 +371,7 @@ func (c *Coordinator) removeStaleSocket(ctx context.Context, m Manifest, l Launc
 
 func verifyStaleSocket(ctx context.Context, s *store, m Manifest, l Launch) (unix.Stat_t, error) {
 	var empty unix.Stat_t
-	if m.Owner != s.token || m.Protocol != ProtocolVersion || l.Server == nil || !validProcessIdentity(*l.Server) {
+	if m.Owner != s.token || !supportedJobProtocol(m.Protocol) || l.Server == nil || !validProcessIdentity(*l.Server) {
 		return empty, errors.New("recorded server identity unavailable")
 	}
 	socket, err := s.socket(m.ID, false)

@@ -2,6 +2,8 @@ package coordinator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -12,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"agent-coordinator/internal/pilaunch"
 	"agent-coordinator/internal/tmux"
+	"golang.org/x/sys/unix"
 )
 
 type Coordinator struct {
@@ -81,6 +85,34 @@ func canonicalCwd(path string) (string, error) {
 	}
 	return abs, nil
 }
+func lockStagedLaunch(file *os.File) error {
+	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
+}
+
+func unlockStagedLaunch(file *os.File) {
+	_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+}
+
+func interactiveLaunchEnvironment(root, owner, id string) []string {
+	return interactiveLaunchEnvironmentFrom(os.Environ(), root, owner, id)
+}
+
+func interactiveLaunchEnvironmentFrom(base []string, root, owner, id string) []string {
+	env := []string{}
+	for _, entry := range base {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "AC_") {
+			continue
+		}
+		switch key {
+		case "PI_SESSION_ID", "PI_SESSION_FILE", "KITTY_WINDOW_ID", "KITTY_LISTEN_ON", "KITTY_PID", "WINDOWID":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "AC_STATE_DIR="+root, "AC_OWNER="+owner, "AC_JOB="+id)
+}
+
 func launchEnvironment(root, owner, id string) []string {
 	env := []string{}
 	for _, entry := range os.Environ() {
@@ -108,7 +140,27 @@ func (c *Coordinator) startManaged(ctx context.Context, name, cwd string, task [
 }
 
 func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, expected *CommunicationManager) (JobFacts, error) {
-	if validateName(name) != nil || validateTask(task) != nil {
+	return c.startTransaction(ctx, name, cwd, task, nil, expected)
+}
+
+func (c *Coordinator) startInteractive(ctx context.Context, cwd string, argv []string, native pilaunch.Managed, payload []byte) (JobFacts, error) {
+	id, err := newID()
+	if err != nil {
+		return JobFacts{}, err
+	}
+	name := "pi-" + id[:8]
+	return c.startTransaction(ctx, name, cwd, nil, &interactiveStart{ID: id, Argv: argv, Native: native, Payload: payload}, nil)
+}
+
+type interactiveStart struct {
+	ID      string
+	Argv    []string
+	Native  pilaunch.Managed
+	Payload []byte
+}
+
+func (c *Coordinator) startTransaction(ctx context.Context, name, cwd string, task []byte, interactive *interactiveStart, expected *CommunicationManager) (JobFacts, error) {
+	if validateName(name) != nil || interactive == nil && validateTask(task) != nil {
 		return JobFacts{}, actionError(2, "invalid_input", "invalid name or task: nonblank UTF-8 task <=1 MiB required", false, "", name)
 	}
 	directory, err := canonicalCwd(cwd)
@@ -116,6 +168,10 @@ func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, 
 		return JobFacts{}, actionError(2, "invalid_cwd", "cwd must be an existing directory", false, "", name)
 	}
 	pi, err := executable(c.options.PiPath, "pi")
+	if interactive != nil {
+		pi = interactive.Native.Executable
+		err = pilaunch.Recheck(interactive.Native)
+	}
 	if err != nil {
 		return JobFacts{}, actionError(1, "missing_pi", "Pi executable unavailable on PATH", false, "", name)
 	}
@@ -193,9 +249,14 @@ func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, 
 			return JobFacts{}, actionError(1, "queue_full", "binding capacity is full; job was not dispatched", false, "", name)
 		}
 	}
-	id, err := newID()
-	if err != nil {
-		return JobFacts{}, err
+	id := ""
+	if interactive != nil {
+		id = interactive.ID
+	} else {
+		id, err = newID()
+		if err != nil {
+			return JobFacts{}, err
+		}
 	}
 	socket, err := c.store.socket(id, true)
 	if err != nil {
@@ -216,6 +277,9 @@ func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, 
 		Protocol:     ProtocolVersion,
 		Socket:       socket,
 	}
+	if interactive != nil {
+		m.Protocol = InteractiveProtocolVersion
+	}
 	staging, err := os.MkdirTemp(filepath.Join(c.store.root, "jobs"), ".staging-")
 	if err != nil {
 		return JobFacts{}, err
@@ -226,10 +290,28 @@ func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, 
 			return JobFacts{}, err
 		}
 	}
-	if err := writeBytes(staging, "initial-task.txt", append([]byte(TaskHeader), task...)); err != nil {
-		return JobFacts{}, err
+	if interactive == nil {
+		if err := writeBytes(staging, "initial-task.txt", append([]byte(TaskHeader), task...)); err != nil {
+			return JobFacts{}, err
+		}
+	} else {
+		sum := sha256.Sum256(interactive.Payload)
+		intent := InteractiveIntent{Schema: SchemaVersion, Kind: "interactive", TerminalProfile: TransparentTerminalProfile, ArgvSHA256: hex.EncodeToString(sum[:]), NativePi: &interactive.Native}
+		if err := writeJSON(staging, "intent.json", intent); err != nil {
+			return JobFacts{}, err
+		}
+		if err := writeJSON(staging, "role.json", JobRole{Schema: SchemaVersion, Role: "standalone"}); err != nil {
+			return JobFacts{}, err
+		}
+		if err := writeBytes(staging, "launch-argv.json", interactive.Payload); err != nil {
+			return JobFacts{}, err
+		}
 	}
-	if err := writeBytes(staging, "tmux.conf", []byte(tmux.Config(c.store.token, id, name))); err != nil {
+	config := tmux.Config(c.store.token, id, name)
+	if interactive != nil {
+		config = tmux.TransparentConfig(c.store.token, id)
+	}
+	if err := writeBytes(staging, "tmux.conf", []byte(config)); err != nil {
 		return JobFacts{}, err
 	}
 	f, err := privateFile(filepath.Join(staging, "launch.lock"), os.O_RDWR|os.O_CREATE)
@@ -240,15 +322,40 @@ func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, 
 		f.Close()
 		return JobFacts{}, err
 	}
-	f.Close()
+	launchLocked := false
+	if interactive != nil {
+		if err := lockStagedLaunch(f); err != nil {
+			f.Close()
+			return JobFacts{}, err
+		}
+		launchLocked = true
+	}
+	launchFileOpen := true
+	unlockLaunch := func() {
+		if launchFileOpen {
+			if launchLocked {
+				unlockStagedLaunch(f)
+				launchLocked = false
+			}
+			_ = f.Close()
+			launchFileOpen = false
+		}
+	}
+	defer unlockLaunch()
 	if err := syncDir(staging); err != nil {
+		unlockLaunch()
 		return JobFacts{}, err
 	}
 	job := filepath.Join(c.store.root, "jobs", id)
 	if err := os.Rename(staging, job); err != nil {
+		unlockLaunch()
 		return JobFacts{}, err
 	}
 	if err := syncDir(filepath.Dir(job)); err != nil {
+		if interactive != nil {
+			_ = writeJSON(job, "launch.json", Launch{Schema: SchemaVersion, Phase: "revoked", Retired: true, Error: "publication sync failed"})
+		}
+		unlockLaunch()
 		return JobFacts{}, actionError(75, "uncertain_publication", "job publication uncertain; inspect list/doctor, do not retry", true, id, name)
 	}
 	if expected != nil {
@@ -265,18 +372,29 @@ func (c *Coordinator) start(ctx context.Context, name, cwd string, task []byte, 
 	}
 	launchCtx, stop := context.WithTimeout(ctx, 10*time.Second)
 	defer stop()
-	// Submission happens once. A failed client may still have reached the server.
-	_ = client.Create(launchCtx, tmux.CreateOptions{
-		Socket:     socket,
-		Config:     filepath.Join(job, "tmux.conf"),
-		Session:    "ac-" + id,
-		Executable: self,
-		JobID:      id,
-		RuntimeDir: job,
-		Env:        launchEnvironment(c.store.root, c.store.token, id),
-		Width:      width,
-		Height:     height,
-	})
+	if interactive != nil {
+		topologyCtx, cancelTopology := context.WithTimeout(launchCtx, 5*time.Second)
+		_ = client.Create(topologyCtx, tmux.CreateOptions{Socket: socket, Config: filepath.Join(job, "tmux.conf"), Session: "ac-" + id, Executable: self, JobID: id, RuntimeDir: job, Env: interactiveLaunchEnvironment(c.store.root, c.store.token, id), Width: width, Height: height})
+		if topologyCtx.Err() == nil {
+			_ = client.CreateReturnView(topologyCtx, socket, "ac-"+id, "ac-return-"+id)
+		}
+		if topologyCtx.Err() == nil {
+			_, err = client.InspectTransparent(topologyCtx, socket, "ac-"+id, "ac-return-"+id)
+		} else {
+			err = topologyCtx.Err()
+		}
+		cancelTopology()
+		if err != nil {
+			l := Launch{Schema: SchemaVersion, Phase: "revoked", Retired: true, Error: "interactive topology creation failed"}
+			_ = writeJSON(job, "launch.json", l)
+			unlockLaunch()
+			return JobFacts{ID: id, Name: name, Launch: "revoked", Terminal: "unknown", PiReadiness: "unverified", TaskOutcome: "unknown", NextAction: "inspect by ID; do not retry"}, actionError(75, "topology_unconfirmed", "interactive topology is incomplete; inspect by ID, do not retry", true, id, name)
+		}
+		unlockLaunch()
+	} else {
+		// Submission happens once. A failed client may still have reached the server.
+		_ = client.Create(launchCtx, tmux.CreateOptions{Socket: socket, Config: filepath.Join(job, "tmux.conf"), Session: "ac-" + id, Executable: self, JobID: id, RuntimeDir: job, Env: launchEnvironment(c.store.root, c.store.token, id), Width: width, Height: height})
+	}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {

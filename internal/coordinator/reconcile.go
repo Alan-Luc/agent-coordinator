@@ -15,7 +15,7 @@ func (c *Coordinator) facts(ctx context.Context, m Manifest, l Launch) JobFacts 
 		f.NextAction = reason + "; inspect ownership and process identity; do not act"
 		return f
 	}
-	if l.Schema != SchemaVersion || m.Schema != SchemaVersion || m.Owner != c.store.token || m.Protocol != ProtocolVersion {
+	if l.Schema != SchemaVersion || m.Schema != SchemaVersion || m.Owner != c.store.token || !supportedJobProtocol(m.Protocol) {
 		return unknown("record schema or ownership mismatch")
 	}
 	if m.BootIDScheme != BootIdentityScheme || !bootUUIDPattern.MatchString(m.BootID) {
@@ -81,7 +81,7 @@ func (c *Coordinator) facts(ctx context.Context, m Manifest, l Launch) JobFacts 
 		f.Launch = "submitted"
 		f.Terminal = "live"
 		f.NextAction = "enter or observe"
-		if status, statusErr := readSessionStatus(filepath.Join(c.store.root, "jobs", m.ID, "session.json"), time.Now()); statusErr == nil && validateSessionStatus(status, m.ID, m.Owner, pane.PID, time.Now()) == nil {
+		if status, statusErr := readSessionStatus(filepath.Join(c.store.root, "jobs", m.ID, "session.json"), time.Now()); statusErr == nil && c.validateJobSessionStatus(m, l, status, time.Now()) == nil {
 			f.Session = &status
 		}
 		return f

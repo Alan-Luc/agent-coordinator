@@ -41,5 +41,29 @@ func (c *Coordinator) attach(ctx context.Context, name string, observe, byID boo
 	if se != nil || pe != nil || l.Server == nil || l.Pane == nil || !sameIdentity(server, *l.Server) || !sameIdentity(pane, *l.Pane) || snap.PaneDead {
 		return nil, actionError(1, "identity_changed", "job process identity changed", true, id, name)
 	}
-	return (tmux.Client{Executable: m.Tmux}).AttachCommand(ctx, m.Socket, "ac-"+id, observe), nil
+	session := "ac-" + id
+	if m.Protocol == InteractiveProtocolVersion {
+		session = "ac-return-" + id
+	}
+	return (tmux.Client{Executable: m.Tmux}).AttachCommand(ctx, m.Socket, session, observe), nil
+}
+
+func (c *Coordinator) attachProtocol2(ctx context.Context, id, session string) (*exec.Cmd, error) {
+	if os.Getenv("TMUX") != "" {
+		return nil, actionError(2, "inside_tmux", "Enter and Observe require an ordinary terminal", false, id, "")
+	}
+	m, l, err := c.store.load(id)
+	if err != nil || m.Protocol != InteractiveProtocolVersion || l.Phase != "exec-intent" || l.Server == nil || l.Pane == nil {
+		return nil, actionError(1, "target_unavailable", "interactive session is unavailable or unverified", true, id, "")
+	}
+	snap, err := c.ownedSnapshot(ctx, m)
+	server, serverErr := identifyProcess(snap.ServerPID)
+	pane, paneErr := identifyProcess(snap.PanePID)
+	if err != nil || snap.PaneDead || snap.PanePID != l.Pane.PID || serverErr != nil || paneErr != nil || !sameIdentity(server, *l.Server) || !sameIdentity(pane, *l.Pane) {
+		return nil, actionError(1, "identity_changed", "interactive process identity changed", true, id, "")
+	}
+	if session != "ac-"+id && session != "ac-return-"+id {
+		return nil, actionError(2, "invalid_view", "interactive view is invalid", false, id, "")
+	}
+	return (tmux.Client{Executable: m.Tmux}).AttachCommand(ctx, m.Socket, session, false), nil
 }

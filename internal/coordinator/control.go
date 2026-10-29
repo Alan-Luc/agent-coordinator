@@ -22,6 +22,10 @@ const controlStatusMaxAge = 10 * time.Second
 const controlAuthorizationTTL = 30 * time.Second
 const controlWireLimit = 512 * 1024
 
+func sessionLaunchProtocolMatches(status SessionStatus, protocol string) bool {
+	return protocol == ProtocolVersion && status.LaunchProtocol == "" || protocol == InteractiveProtocolVersion && status.LaunchProtocol == InteractiveProtocolVersion
+}
+
 func validateSessionStatus(s SessionStatus, id, owner string, pid int, now time.Time) error {
 	if s.Protocol != ControlProtocol || s.JobID != id || s.Owner != owner || s.PID != pid || s.SessionID == "" || len(s.SessionID) > 256 || !utf8.ValidString(s.SessionID) || !idPattern.MatchString(s.Generation) || s.UpdatedAt <= 0 || now.UnixMilli()-s.UpdatedAt > controlStatusMaxAge.Milliseconds() || s.UpdatedAt > now.Add(time.Second).UnixMilli() {
 		return errors.New("session status identity or freshness mismatch")
@@ -74,7 +78,7 @@ func (c *Coordinator) ControlTarget(ctx context.Context, id string) (SessionTarg
 		return SessionTarget{}, actionError(1, "identity_changed", "session process identity changed", true, id, "")
 	}
 	status, err := readSessionStatus(filepath.Join(c.store.root, "jobs", id, "session.json"), time.Now())
-	if err != nil || validateSessionStatus(status, id, m.Owner, pane.PID, time.Now()) != nil {
+	if err != nil || c.validateJobSessionStatus(m, l, status, time.Now()) != nil {
 		return SessionTarget{}, actionError(1, "session_unavailable", "fresh verified session control is unavailable", true, id, "")
 	}
 	return SessionTarget{ID: id, SessionID: status.SessionID, Generation: status.Generation, Pane: pane}, nil
