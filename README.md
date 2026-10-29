@@ -207,6 +207,16 @@ model wake-ups. Native prompt observation is partial and may miss brief dialogs;
 stale, startup and unsupported observation is unknown. There is no always-on
 service or desktop-notification delivery while Pi is closed.
 
+While an enabled manager is open, each newly observed worker prompt also submits
+an optional desktop alert via `terminal-notifier` on macOS or `notify-send` on
+Linux (e.g. dunst/mako). The coordinator CLI remains macOS-only. Alerts identify
+only the worker UUID and prompt kind, never the dialog title or body. Unchanged
+polls do not repeat the alert; a cleared/changed prompt or new worker generation
+can alert again. Missing, failing or unsupported notification backends are
+nonfatal; the native Pi warning remains. Submission is bounded and cancelled on
+manager shutdown, and does not prove visible delivery or human receipt, wake the
+model, or answer a native dialog.
+
 Read-only diagnostics: `agent-coordinator messages --json` (page with `--cursor`).
 Communication uses a separate private versioned `communication/state.json`;
 unknown schemas fail closed. Limits are 4 KiB UTF-8 publication text, 16 unresolved
@@ -219,7 +229,7 @@ evicted to accept new work. Resolved messages and acknowledged results are kept
 at most seven days and may be evicted sooner under pressure. Full queues and
 persistence failures are explicit; `forget` cannot silently remove outstanding
 requests. This is a small local queue, not a secret-input channel or fleet system.
-Optional terminal-notifier is not required or installed by this package.
+Optional notification executables are not required or installed by this package.
 
 ## State, privacy and limits
 

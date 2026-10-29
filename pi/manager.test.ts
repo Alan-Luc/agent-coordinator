@@ -26,6 +26,7 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
   const requests: TestRequest[] = [];
   const messages: Parameters<ExtensionAPI["sendMessage"]>[] = [];
   const notifications: string[] = [];
+  const desktopAlerts: { jobId: string; kind: string; signal: AbortSignal }[] = [];
   const widgets: string[][] = [];
   const confirmations: string[] = [];
   const target = { id: jobId, session_id: randomUUID(), generation: randomUUID(), pane: { boot_id: "3e322019-1073-4f52-afd0-abed9a17ce70", pid: 123, uid: 501, start_sec: 10, start_usec: 0 } };
@@ -52,7 +53,7 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
     },
   };
   const controller = { status: status ?? (() => undefined), report: async () => undefined };
-  const adapter: ReturnType<typeof registerManager> = Reflect.apply(registerManager, undefined, [pi, controller, cli]);
+  const adapter: ReturnType<typeof registerManager> = Reflect.apply(registerManager, undefined, [pi, controller, cli, async (jobId: string, kind: string, signal: AbortSignal) => { desktopAlerts.push({ jobId, kind, signal }); return new Promise<boolean>(() => {}); }]);
   const context = {
     cwd: "/tmp",
     mode,
@@ -64,7 +65,7 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
     start: (request: Parameters<typeof adapter.start>[0], signal: AbortSignal | undefined, ctx: typeof context): ReturnType<typeof adapter.start> => Reflect.apply(adapter.start, adapter, [request, signal, ctx]),
     execute: (request: Parameters<typeof adapter.execute>[0], signal: AbortSignal | undefined, ctx: typeof context): ReturnType<typeof adapter.execute> => Reflect.apply(adapter.execute, adapter, [request, signal, ctx]),
   };
-  return { adapter: calls, context, events, commands, requests, messages, notifications, widgets, confirmations, target, setConfirmation: (value: boolean | (() => boolean)) => { confirmation = value; }, changeSession: (value: string) => { currentSessionId = value; }, setSessionFile: (value: string | undefined) => { currentSessionFile = value; } };
+  return { adapter: calls, context, events, commands, requests, messages, notifications, desktopAlerts, widgets, confirmations, target, setConfirmation: (value: boolean | (() => boolean)) => { confirmation = value; }, changeSession: (value: string) => { currentSessionId = value; }, setSessionFile: (value: string | undefined) => { currentSessionFile = value; } };
 }
 
 test("uninitialized session start is definitively unmanaged", async () => {
@@ -150,19 +151,23 @@ test("concurrent first callers share a single persisted-session initialization",
   await h.events.get("session_shutdown")?.();
 });
 
-test("first fresh native prompt observation notifies without a model wake", async () => {
+test("first fresh native prompt observation notifies without a model wake", async (t) => {
   const h = harness(request => request.action === "capability" ? { capability: { protocol: 1 } }
     : request.action === "reconnect" ? { manager: { ...manager, lease: { generation: callerGeneration(request), process: processIdentity } } }
     : request.action === "inbox" ? { inbox: { messages: [], pending: 0, escalated: 0, degraded: false, workers: [{ protocol: 1, job_id: jobId, owner: "owner", session_id: "worker", generation: sessionId, pid: 123, updated_at: Date.now(), activity: "idle", prompt: { kind: "confirm", title: "Disposable prompt" } }] } }
     : { manager }, "tui");
+  t.after(async () => { await h.events.get("session_shutdown")?.(); });
   await h.events.get("session_start")?.({}, h.context);
   await new Promise(resolve => setTimeout(resolve, 2200));
+  assert.deepEqual(h.desktopAlerts.map(({ jobId, kind }) => ({ jobId, kind })), [{ jobId, kind: "confirm" }]);
   assert.equal(h.notifications.filter(message => message.includes("Enter that worker")).length, 1);
   await h.events.get("agent_settled")?.();
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(h.notifications.filter(message => message.includes("Enter that worker")).length, 1);
+  assert.equal(h.desktopAlerts.length, 1);
   assert.equal(h.messages.length, 0);
   await h.events.get("session_shutdown")?.();
+  assert.equal(h.desktopAlerts[0].signal.aborted, true);
 });
 
 test("enabled manager start sends its stable lease identity and unwraps started facts", async () => {
@@ -323,13 +328,15 @@ test("routine progress updates a sanitized widget without waking the model", asy
 
 test("worker prompt changes notify once without relying on updated_at", { timeout: 8_000 }, async () => {
   let polls = 0;
+  let clearPrompt = false;
+  let title = "Sensitive title must never leave the prompt";
   const worker = { protocol: 1, job_id: jobId, owner: "owner", session_id: randomUUID(), generation: randomUUID(), pid: 123, updated_at: Date.now(), activity: "idle" };
   const h = harness((request) => {
     if (request.action === "capability") return { capability: { protocol: 1 } };
     if (request.action === "reconnect") return { manager: { ...manager, lease: { generation: callerGeneration(request), process: processIdentity } } };
     if (request.action === "inbox") {
       polls++;
-      const status = { ...worker, ...(polls > 1 ? { prompt: { kind: "question", title: "Continue?" } } : {}) };
+      const status = { ...worker, ...(polls > 1 && !clearPrompt ? { prompt: { kind: "question", title } } : {}) };
       return { inbox: { messages: [], pending: 0, escalated: 0, degraded: false, workers: [status] } };
     }
     return { error: { code: "unexpected", message: "unexpected", uncertain: false } };
@@ -344,7 +351,20 @@ test("worker prompt changes notify once without relying on updated_at", { timeou
   await h.events.get("agent_settled")?.();
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(h.notifications.length, 1);
+  assert.deepEqual(h.desktopAlerts.map(({ jobId, kind }) => ({ jobId, kind })), [{ jobId, kind: "question" }]);
+  for (const transition of ["clear", "reappear", "title", "generation"]) {
+    if (transition === "clear") clearPrompt = true;
+    if (transition === "reappear") clearPrompt = false;
+    if (transition === "title") title = "Different sensitive title";
+    if (transition === "generation") worker.generation = randomUUID();
+    await h.events.get("agent_settled")?.();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(h.desktopAlerts.length, transition === "clear" ? 1 : transition === "reappear" ? 2 : transition === "title" ? 3 : 4);
+  }
+  assert.equal(h.messages.length, 0);
+  assert.ok(h.notifications.every(message => !message.includes("sensitive title")));
   await h.events.get("session_shutdown")?.();
+  assert.ok(h.desktopAlerts.every(alert => alert.signal.aborted));
 });
 
 test("adoption sends the exact confirmed target after native approval", async () => {
