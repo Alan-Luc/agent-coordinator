@@ -308,8 +308,11 @@ func (s *store) load(id string) (Manifest, Launch, error) {
 	if err := readJSON(filepath.Join(p, "launch.json"), &l); err != nil {
 		return m, l, err
 	}
-	if m.Schema != SchemaVersion || l.Schema != SchemaVersion || m.ID != id || m.Owner != s.token || m.Protocol != ProtocolVersion || m.BootID == "" || validateName(m.Name) != nil || (m.BootIDScheme != "" && m.BootIDScheme != BootIdentityScheme) || (m.BootIDScheme == BootIdentityScheme && !bootUUIDPattern.MatchString(m.BootID)) {
+	if m.Schema != SchemaVersion || l.Schema != SchemaVersion || m.ID != id || m.Owner != s.token || !supportedJobProtocol(m.Protocol) || m.BootID == "" || validateName(m.Name) != nil || (m.BootIDScheme != "" && m.BootIDScheme != BootIdentityScheme) || (m.BootIDScheme == BootIdentityScheme && !bootUUIDPattern.MatchString(m.BootID)) {
 		return m, l, errors.New("unknown or invalid job schema/ownership")
+	}
+	if err := validateLaunchKind(p, m.Protocol); err != nil {
+		return m, l, err
 	}
 	expected, err := s.socket(id, false)
 	if err != nil || m.Socket != expected {

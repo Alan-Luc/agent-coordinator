@@ -83,16 +83,17 @@ type ObservedPrompt struct {
 }
 
 type SessionStatus struct {
-	Protocol   int             `json:"protocol"`
-	JobID      string          `json:"job_id"`
-	Owner      string          `json:"owner"`
-	SessionID  string          `json:"session_id"`
-	Generation string          `json:"generation"`
-	PID        int             `json:"pid"`
-	UpdatedAt  int64           `json:"updated_at"`
-	Activity   string          `json:"activity"`
-	Prompt     *ObservedPrompt `json:"prompt,omitempty"`
-	Report     *AgentReport    `json:"report,omitempty"`
+	LaunchProtocol string          `json:"launch_protocol,omitempty"`
+	Protocol       int             `json:"protocol"`
+	JobID          string          `json:"job_id"`
+	Owner          string          `json:"owner"`
+	SessionID      string          `json:"session_id"`
+	Generation     string          `json:"generation"`
+	PID            int             `json:"pid"`
+	UpdatedAt      int64           `json:"updated_at"`
+	Activity       string          `json:"activity"`
+	Prompt         *ObservedPrompt `json:"prompt,omitempty"`
+	Report         *AgentReport    `json:"report,omitempty"`
 }
 
 type SessionTarget struct {
