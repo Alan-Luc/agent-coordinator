@@ -119,7 +119,7 @@ type model struct {
 }
 
 func newModel(ctx context.Context, c *coordinator.Coordinator) model {
-	return model{ctx: ctx, coordinator: c, width: 100, height: 30, observe: true}
+	return model{ctx: ctx, coordinator: c, width: 100, height: 30}
 }
 
 func (m model) Init() tea.Cmd {
@@ -268,7 +268,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selected < 0 {
 				m.selected = 0
 			}
-			if selectedID != "" {
+			if selectedID != "" || len(m.jobs) > 0 {
 				current, ok := m.selectedJob()
 				if !ok || current.ID != selectedID || (current.Session != nil) != selectedHadSession || current.Session != nil && (current.Session.SessionID != selectedSessionID || current.Session.Generation != selectedGeneration) {
 					m.selectionChanged()
@@ -393,6 +393,10 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			job, ok := m.selectedJob()
 			if !ok || job.Retired || job.ID == "" || job.Name == "" {
 				m.message = "Select an active job to attach."
+				return m, nil
+			}
+			if !m.observe {
+				m.observe = true
 				return m, nil
 			}
 			m.viewGeneration++
@@ -658,6 +662,7 @@ func (m model) attach(observe bool) tea.Cmd {
 }
 
 func (m *model) selectionChanged() {
+	m.observe = false
 	m.viewGeneration++
 	m.previewText = ""
 	m.previewError = ""
@@ -1201,7 +1206,7 @@ func renderObserve(job coordinator.JobFacts, width, height int, visible bool, pr
 			}
 		}
 	} else {
-		lines = append(lines, "Output hidden · o show")
+		lines = append(lines, "Output hidden · Enter preview · o show")
 	}
 	if len(lines) > height {
 		lines = lines[:height]

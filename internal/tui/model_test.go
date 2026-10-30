@@ -59,9 +59,68 @@ func TestEmptySelectionActionsStayUsable(t *testing.T) {
 	}
 }
 
+func TestDashboardPreviewRequiresEnterForEachSelection(t *testing.T) {
+	m := newModel(t.Context(), &coordinator.Coordinator{})
+	m.jobs = []coordinator.JobFacts{{ID: "first", Name: "first"}, {ID: "second", Name: "second"}}
+	if m.observe {
+		t.Fatal("preview enabled by default")
+	}
+	updated, _ := m.Update(previewTickMsg{})
+	m = updated.(model)
+	if m.previewLoading {
+		t.Fatal("hidden preview started a capture")
+	}
+	updated, command := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if !m.observe || m.busy || command != nil {
+		t.Fatal("first Enter must reveal preview without attaching")
+	}
+	updated, _ = m.Update(previewTickMsg{})
+	m = updated.(model)
+	if !m.previewLoading {
+		t.Fatal("requested preview did not start capture")
+	}
+	updated, command = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !updated.(model).busy || command == nil {
+		t.Fatal("second Enter did not start attach")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	if m.observe {
+		t.Fatal("selection change kept preview enabled")
+	}
+	updated, _ = m.Update(previewMsg{jobID: "first", generation: m.previewGen, text: "stale output"})
+	m = updated.(model)
+	updated, _ = m.Update(previewTickMsg{})
+	m = updated.(model)
+	if m.previewLoading || m.previewText != "" {
+		t.Fatal("selection change captured or displayed unsolicited output")
+	}
+	updated, command = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !updated.(model).observe || updated.(model).busy || command != nil {
+		t.Fatal("new selection bypassed preview step")
+	}
+}
+
+func TestNewSelectionAfterEmptyRefreshHidesPreview(t *testing.T) {
+	m := newModel(t.Context(), &coordinator.Coordinator{})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	m = updated.(model)
+	updated, _ = m.Update(resultMsg{operation: loadJobs, jobs: []coordinator.JobFacts{{ID: "new", Name: "new"}}})
+	m = updated.(model)
+	if m.observe {
+		t.Fatal("newly populated selection inherited preview opt-in from empty dashboard")
+	}
+	updated, _ = m.Update(previewTickMsg{})
+	if updated.(model).previewLoading {
+		t.Fatal("new selection started unsolicited capture")
+	}
+}
+
 func TestActiveSelectionStartsAttach(t *testing.T) {
 	m := newModel(context.Background(), nil)
 	m.jobs = []coordinator.JobFacts{{ID: "active-uuid", Name: "worker"}}
+	m.observe = true
 	updated, command := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !updated.(model).busy || command == nil {
 		t.Fatal("active selection did not start an asynchronous attach")
@@ -197,7 +256,7 @@ func TestHelpFitsTinyAndOrdinaryTerminals(t *testing.T) {
 		}
 		if size.width >= 80 {
 			plain := ansi.Strip(view)
-			for _, binding := range []string{"↑/↓ select session", "Enter open session", "o toggle Observe", "n create new", "m steer", "s request graceful stop", "X force-stop", "d details", "c process Continue", "r repair", "f Forget", "l refresh", "q / Esc / h close", "F12 Return"} {
+			for _, binding := range []string{"↑/↓ select session", "Enter preview, then open session", "o toggle Observe", "n create new", "m steer", "s request graceful stop", "X force-stop", "d details", "c process Continue", "r repair", "f Forget", "l refresh", "q / Esc / h close", "F12 Return"} {
 				if !strings.Contains(plain, binding) {
 					t.Errorf("%dx%d help omitted %q:\n%s", size.width, size.height, binding, plain)
 				}

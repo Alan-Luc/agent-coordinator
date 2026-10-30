@@ -189,7 +189,7 @@ func TestObservePrioritizesReadOnlyIdentityAndAttention(t *testing.T) {
 		if visible && (!strings.Contains(view, "Live output · current screen") || !strings.Contains(view, "output-token")) {
 			t.Errorf("capture not labeled/shown:\n%s", view)
 		}
-		if !visible && (strings.Contains(view, "output-token") || !strings.Contains(view, "Output hidden · o show")) {
+		if !visible && (strings.Contains(view, "output-token") || !strings.Contains(view, "Output hidden · Enter preview · o show")) {
 			t.Errorf("output toggle hid facts or exposed capture:\n%s", view)
 		}
 	}
@@ -351,9 +351,9 @@ func TestDashboardShowsSharedClientCount(t *testing.T) {
 	}
 }
 
-func TestObserveStartsLiveWithoutAnExtraToggle(t *testing.T) {
-	if !newModel(t.Context(), nil).observe {
-		t.Fatal("dashboard must start with live Observe enabled")
+func TestObserveStartsHidden(t *testing.T) {
+	if newModel(t.Context(), nil).observe {
+		t.Fatal("dashboard must start with live Observe disabled")
 	}
 }
 
@@ -526,7 +526,7 @@ func TestDashboardOffersLiteralSteeringAndConfirmedStopControls(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
 	m = updated.(model)
 	help := ansi.Strip(m.View())
-	for _, key := range []string{"↑/↓ select", "Enter open", "o toggle Observe", "n create", "m steer", "s request graceful stop", "X force-stop", "d details", "c process Continue", "r repair", "f Forget ended job", "l refresh", "q / Esc / h close", "Ctrl+C quit", "F12 Return"} {
+	for _, key := range []string{"↑/↓ select", "Enter preview, then open", "o toggle Observe", "n create", "m steer", "s request graceful stop", "X force-stop", "d details", "c process Continue", "r repair", "f Forget ended job", "l refresh", "q / Esc / h close", "Ctrl+C quit", "F12 Return"} {
 		if !strings.Contains(help, key) {
 			t.Errorf("help omits binding %q:\\n%s", key, help)
 		}
@@ -625,6 +625,7 @@ func TestNarrowDashboardKeepsPreviewVisible(t *testing.T) {
 
 func TestObserveToggleControlsOnlyPreviewVisibility(t *testing.T) {
 	m := newModel(t.Context(), nil)
+	m.observe = true
 	m.jobs = []coordinator.JobFacts{{ID: "id", Name: "worker"}}
 	m.previewText = "preview-only-marker"
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})

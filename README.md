@@ -106,7 +106,9 @@ Press **h** for centered keyboard help, then **Esc**, **h**, or **q** to close i
 readiness/outcome guidance visible; action errors and confirmation warnings are
 not hidden in help.
 
-**Enter** opens that same native Pi session; **F12 Return** detaches only your
+Live output is off by default, including when changing selection. **Enter** shows
+its preview; press **Enter** again to open that same native Pi session. **o** toggles
+live output. **F12 Return** detaches only your
 client. Observe captures the current screen, not scrollback, without forwarding
 input or resizing Pi. It preserves validated colors and basic text styles while
 filtering terminal-control sequences; captured content is not an attention or
