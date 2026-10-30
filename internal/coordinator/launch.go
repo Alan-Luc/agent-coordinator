@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"agent-coordinator/internal/pilaunch"
-	"agent-coordinator/internal/tmux"
+	"coordinate/internal/pilaunch"
+	"coordinate/internal/tmux"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,7 +26,7 @@ type Coordinator struct {
 
 func Open(options Options) (*Coordinator, error) {
 	if runtime.GOOS != "darwin" {
-		return nil, actionError(2, "unsupported_platform", "agent-coordinator v1 supports macOS only", false, "", "")
+		return nil, actionError(2, "unsupported_platform", "Coordinate v1 supports macOS only", false, "", "")
 	}
 	s, err := openStore(options.StateDir)
 	if err != nil {

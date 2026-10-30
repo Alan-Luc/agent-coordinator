@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"agent-coordinator/internal/pilaunch"
+	"coordinate/internal/pilaunch"
 )
 
 func TestMain(m *testing.M) {

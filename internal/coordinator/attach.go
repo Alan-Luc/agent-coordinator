@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/exec"
 
-	"agent-coordinator/internal/tmux"
+	"coordinate/internal/tmux"
 )
 
 func (c *Coordinator) Attach(ctx context.Context, name string, observe bool) (*exec.Cmd, error) {

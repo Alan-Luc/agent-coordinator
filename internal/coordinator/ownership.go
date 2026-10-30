@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"agent-coordinator/internal/tmux"
+	"coordinate/internal/tmux"
 	"golang.org/x/sys/unix"
 )
 

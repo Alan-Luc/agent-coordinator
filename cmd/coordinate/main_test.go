@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-coordinator/internal/coordinator"
+	"coordinate/internal/coordinator"
 )
 
 func TestRejectInvalidRequestsWithoutLeakingTask(t *testing.T) {
@@ -93,6 +93,17 @@ func TestStopRequiresInteractiveConfirmationBeforeTargetLookup(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("stop created job-side effects before confirmation: %v", entries)
+	}
+}
+
+func TestPublicUsageNamesCoordinate(t *testing.T) {
+	t.Setenv("AC_STATE_DIR", filepath.Join(t.TempDir(), "state"))
+	var output, diagnostics bytes.Buffer
+	if code := run([]string{"unknown"}, inputFile(t, ""), &output, &diagnostics); code != 2 {
+		t.Fatalf("usage exit = %d, want 2", code)
+	}
+	if !strings.Contains(diagnostics.String(), "usage: coordinate [") || strings.Contains(diagnostics.String(), "agent-coordinator") {
+		t.Fatalf("wrong public usage: %s", diagnostics.String())
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"agent-coordinator/internal/coordinator"
+	"coordinate/internal/coordinator"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -710,9 +710,9 @@ func (m model) View() string {
 		}
 	}
 	if narrow {
-		view.WriteString("Agent coordinator\n")
+		view.WriteString("Coordinate\n")
 	} else {
-		view.WriteString(lipgloss.NewStyle().Bold(true).Render("Agent coordinator") + "\n")
+		view.WriteString(lipgloss.NewStyle().Bold(true).Render("Coordinate") + "\n")
 		if m.mode == dashboard {
 			fmt.Fprintf(&view, "%d sessions · %d with known attention · %d observation unknown\n", len(m.jobs), attentionCount, unknownCount)
 		}
@@ -794,7 +794,7 @@ func (m model) renderTableDashboard() string {
 	// shortcut: fit around the usual 120-column native screen; measure captures if variable widths become important.
 	leftWidth := min(m.width/2-2, max(48, m.width-121))
 	rightWidth := m.width - leftWidth - 1
-	header := renderSectionBar(fmt.Sprintf(" Agent coordinator │ %d sessions │ attention %d │ unknown %d", len(m.jobs), known, unknown), m.width)
+	header := renderSectionBar(fmt.Sprintf(" Coordinate │ %d sessions │ attention %d │ unknown %d", len(m.jobs), known, unknown), m.width)
 	table := renderSessionTable(m.jobs, m.selected, leftWidth, available)
 	observe := renderObserve(m.selectedJobValue(), rightWidth, available, m.observe, m.previewText, m.previewError)
 	left := lipgloss.NewStyle().Width(leftWidth).Height(available).Render(clipView(table, leftWidth, available))

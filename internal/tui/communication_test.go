@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-coordinator/internal/coordinator"
+	"coordinate/internal/coordinator"
 )
 
 func TestOutstandingCommunicationSurvivesEmptyActiveDashboard(t *testing.T) {

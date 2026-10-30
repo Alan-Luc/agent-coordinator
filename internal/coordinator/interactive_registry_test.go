@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agent-coordinator/internal/pilaunch"
+	"coordinate/internal/pilaunch"
 )
 
 func TestLoadInteractiveRequiresIntentAndRole(t *testing.T) {

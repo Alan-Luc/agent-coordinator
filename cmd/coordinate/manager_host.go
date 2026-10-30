@@ -6,12 +6,12 @@ import (
 	"io"
 	"os"
 
-	"agent-coordinator/internal/coordinator"
+	"coordinate/internal/coordinator"
 )
 
 func runManagerHost(ctx context.Context, c *coordinator.Coordinator, args []string, in io.Reader, out io.Writer, fail func(error) int, invalid func(string) int) int {
 	if len(args) != 2 || args[1] != "--json" {
-		return invalid("usage: agent-coordinator _manager-host --json")
+		return invalid("usage: coordinate _manager-host --json")
 	}
 	var request struct {
 		Target *coordinator.SessionTarget `json:"target"`

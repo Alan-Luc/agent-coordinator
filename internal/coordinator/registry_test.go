@@ -11,6 +11,40 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestRenamePreservesDefaultStateAndTaskEnvelope(t *testing.T) {
+	for _, useXDG := range []bool{true, false} {
+		t.Run(map[bool]string{true: "xdg", false: "home"}[useXDG], func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("AC_STATE_DIR", "")
+			t.Setenv("HOME", base)
+			t.Setenv("XDG_STATE_HOME", "")
+			if useXDG {
+				t.Setenv("XDG_STATE_HOME", base)
+			} else {
+				base = filepath.Join(base, ".local", "state")
+			}
+			legacyRoot := filepath.Join(base, "agent-coordinator")
+			legacy, err := openStore(legacyRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := openStore("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.root != legacy.root || current.token != legacy.token {
+				t.Fatal("rename changed the existing state location or owner")
+			}
+			if _, err := os.Stat(filepath.Join(base, "coordinate")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unexpected renamed state directory: %v", err)
+			}
+		})
+	}
+	if TaskHeader != "Initial task supplied by agent-coordinator:\n\n" {
+		t.Fatal("rename changed the persisted task envelope")
+	}
+}
+
 func TestTaskAndNameValidation(t *testing.T) {
 	for _, name := range []string{"a", "restaurant-a", "0"} {
 		if err := validateName(name); err != nil {

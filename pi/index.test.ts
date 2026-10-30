@@ -165,7 +165,7 @@ test("stop refuses absent UI or an already-aborted call before CLI mutation", as
 
 test("stop denial and session replacement never reach the mutating CLI phase", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coordinator-stop-confirm-"));
-  const executable = join(directory, "agent-coordinator");
+  const executable = join(directory, "coordinate");
   const capture = join(directory, "commands");
   const previousPath = process.env.PATH;
   const previousCapture = process.env.CONTROL_CAPTURE;
@@ -200,7 +200,7 @@ test("stop denial and session replacement never reach the mutating CLI phase", a
 
 test("uncertain send response is never automatically retried", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coordinator-send-uncertain-"));
-  const executable = join(directory, "agent-coordinator");
+  const executable = join(directory, "coordinate");
   const capture = join(directory, "commands");
   const previousPath = process.env.PATH;
   const previousCapture = process.env.CONTROL_CAPTURE;
@@ -227,10 +227,11 @@ test("uncertain send response is never automatically retried", async () => {
   }
 });
 
-test("extension registers one strict coordinator request tool without spawning", () => {
+test("extension registers one strict Coordinate request tool without spawning", () => {
   const { tool, registrations } = register();
   assert.equal(registrations, 1);
-  assert.equal(tool?.name, "coordinator");
+  assert.equal(tool?.name, "coordinate");
+  assert.equal(tool?.label, "Coordinate");
   assert.ok(tool);
   assert.equal(Value.Check(tool.parameters, { request: { action: "list" } }), true);
   assert.equal(Value.Check(tool.parameters, { request: { action: "list", extra: true } }), false);
@@ -240,7 +241,7 @@ test("extension registers one strict coordinator request tool without spawning",
 
 test("rich reads fall back only for old-CLI invalid_usage and never retry mutations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coordinator-legacy-read-"));
-  const executable = join(directory, "agent-coordinator");
+  const executable = join(directory, "coordinate");
   const capture = join(directory, "commands");
   const previousPath = process.env.PATH;
   const previousCapture = process.env.CONTROL_CAPTURE;
@@ -287,7 +288,7 @@ test("validates action response shapes and rejects malformed protocol", () => {
 
 test("tool executes against the PATH CLI with cwd and task confined to their channels", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coordinator-tool-"));
-  const executable = join(directory, "agent-coordinator");
+  const executable = join(directory, "coordinate");
   const capture = join(directory, "stdin");
   const previousPath = process.env.PATH;
   const previousCapture = process.env.CAPTURE;
@@ -309,9 +310,9 @@ test("tool executes against the PATH CLI with cwd and task confined to their cha
     preAborted.abort();
     const notSubmitted = await Reflect.apply(tool.execute, undefined, ["call", { request: { action: "start", name: "job", cwd: ".", task } }, preAborted.signal, undefined, { cwd: directory }]);
     assert.deepEqual(notSubmitted, {
-      content: [{ type: "text", text: JSON.stringify({ error: { code: "coordinator_error", message: "Coordinator request was cancelled before launch.", name: "job", uncertain: false } }) }],
-      details: { error: { code: "coordinator_error", message: "Coordinator request was cancelled before launch.", name: "job", uncertain: false } },
-      structuredContent: { error: { code: "coordinator_error", message: "Coordinator request was cancelled before launch.", name: "job", uncertain: false } },
+      content: [{ type: "text", text: JSON.stringify({ error: { code: "coordinator_error", message: "Coordinate request was cancelled before launch.", name: "job", uncertain: false } }) }],
+      details: { error: { code: "coordinator_error", message: "Coordinate request was cancelled before launch.", name: "job", uncertain: false } },
+      structuredContent: { error: { code: "coordinator_error", message: "Coordinate request was cancelled before launch.", name: "job", uncertain: false } },
       isError: true,
     });
     assert.equal(await readFile(capture, "utf8"), task);
@@ -327,7 +328,7 @@ test("tool executes against the PATH CLI with cwd and task confined to their cha
     }
     assert.equal(await readFile(startedFile, "utf8"), "yes");
     afterSpawn.abort();
-    const uncertainAbort = { error: { code: "uncertain", message: "Coordinator request cancelled after submission; inspect list/doctor before retrying.", name: "job", uncertain: true } };
+    const uncertainAbort = { error: { code: "uncertain", message: "Coordinate request cancelled after submission; inspect list/doctor before retrying.", name: "job", uncertain: true } };
     assert.deepEqual(await submitted, { content: [{ type: "text", text: JSON.stringify(uncertainAbort) }], details: uncertainAbort, structuredContent: uncertainAbort, isError: true });
 
     await writeFile(executable, `#!/bin/sh\nprintf '%s' '${JSON.stringify({ error: { code: "uncertain", message: "inspect", id: "known-id", name: "job", uncertain: true } })}'\nexit 75\n`);
@@ -343,9 +344,9 @@ test("tool executes against the PATH CLI with cwd and task confined to their cha
     process.env.PATH = directory;
     const missing = await Reflect.apply(tool.execute, undefined, ["call", { request: { action: "start", name: "job", cwd: ".", task } }, undefined, undefined, { cwd: directory }]);
     assert.deepEqual(missing, {
-      content: [{ type: "text", text: JSON.stringify({ error: { code: "coordinator_error", message: "agent-coordinator was not found on PATH; install the coordinator CLI first.", name: "job", uncertain: false } }) }],
-      details: { error: { code: "coordinator_error", message: "agent-coordinator was not found on PATH; install the coordinator CLI first.", name: "job", uncertain: false } },
-      structuredContent: { error: { code: "coordinator_error", message: "agent-coordinator was not found on PATH; install the coordinator CLI first.", name: "job", uncertain: false } },
+      content: [{ type: "text", text: JSON.stringify({ error: { code: "coordinator_error", message: "coordinate was not found on PATH; install the Coordinate CLI first.", name: "job", uncertain: false } }) }],
+      details: { error: { code: "coordinator_error", message: "coordinate was not found on PATH; install the Coordinate CLI first.", name: "job", uncertain: false } },
+      structuredContent: { error: { code: "coordinator_error", message: "coordinate was not found on PATH; install the Coordinate CLI first.", name: "job", uncertain: false } },
       isError: true,
     });
   } finally {

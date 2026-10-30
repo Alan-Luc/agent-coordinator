@@ -12,8 +12,8 @@ import (
 	"strings"
 	"syscall"
 
-	"agent-coordinator/internal/coordinator"
-	"agent-coordinator/internal/tui"
+	"coordinate/internal/coordinator"
+	"coordinate/internal/tui"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
@@ -121,7 +121,7 @@ func run(args []string, in *os.File, out, errOut io.Writer) int {
 		}
 	case "list":
 	default:
-		return invalid("usage: agent-coordinator [start|list|messages|doctor|enter|observe|continue|repair-socket|forget]")
+		return invalid("usage: coordinate [start|list|messages|doctor|enter|observe|continue|repair-socket|forget]")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)

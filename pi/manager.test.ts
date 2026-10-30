@@ -49,7 +49,7 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
     sendMessage: (...args: Parameters<ExtensionAPI["sendMessage"]>) => { messages.push(args); },
   };
   const cli = {
-    findExecutable: async () => "/bin/agent-coordinator",
+    findExecutable: async () => "/bin/coordinate",
     runCli: async (_exe: string, argv: string[], _cwd: string, input?: string) => {
       if (argv[0] === "_target") { if (requirePublication) assert.ok(publications > 0, "target lookup must await current native observation publication"); endpointCalls.push("_target"); const selected = argv[1] === target.id ? target : workerTarget; const wireTarget = reverseTargetFields ? { pane: { start_usec: selected.pane.start_usec, start_sec: selected.pane.start_sec, uid: selected.pane.uid, pid: selected.pane.pid, boot_id: selected.pane.boot_id }, generation: selected.generation, session_id: selected.session_id, id: selected.id } : selected; return { code: 0, stdout: JSON.stringify(JSON.parse(JSON.stringify(wireTarget)) as unknown) }; }
       if (argv[0] === "_features") { endpointCalls.push("_features"); return { code: 0, stdout: JSON.stringify({ features: { interactive_launch: 1, terminal_profile: "transparent-v1", manager_host: 1, pending_manager: 1 } }) }; }
@@ -79,6 +79,13 @@ function harness(response: (request: TestRequest) => unknown, mode = "rpc", stat
   };
   return { adapter: calls, context, events, commands, requests, messages, notifications, widgets, confirmations, target, hostRequests, endpointCalls, setConfirmation: (value: boolean | (() => boolean)) => { confirmation = value; }, reverseTargetFields: () => { reverseTargetFields = true; }, changeSession: (value: string) => { currentSessionId = value; }, setSessionFile: (value: string | undefined) => { currentSessionFile = value; } };
 }
+
+test("public slash command registers only coordinate and advertises its usage", async () => {
+  const h = harness(() => ({}));
+  assert.deepEqual([...h.commands.keys()], ["coordinate"]);
+  await h.commands.get("coordinate")?.handler("invalid", h.context);
+  assert.match(h.notifications[0], /Usage: \/coordinate /);
+});
 
 test("uninitialized session start is definitively unmanaged", async () => {
   const h = harness(() => ({ error: { code: "not_enrolled", message: "not enrolled", uncertain: false } }));
@@ -154,7 +161,7 @@ test("slash manage-on uses the protocol2 consent path", async () => {
   h.setSessionFile(join(directory, "native.jsonl"));
   try {
     await h.events.get("session_start")?.({}, h.context);
-    await h.commands.get("coordinator")?.handler("manage on", h.context);
+    await h.commands.get("coordinate")?.handler("manage on", h.context);
     assert.equal(h.endpointCalls.filter(action => action === "_manager-host").length, 1);
     assert.ok(h.notifications.some(message => message.includes("awaits a persisted conversation")));
   } finally {

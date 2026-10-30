@@ -54,7 +54,7 @@ test("authoritative wire schemas retain their discriminated TypeScript unions", 
 
 test("an uncertain associated start never falls back to an unassociated launch", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coordinator-associated-start-"));
-  const executable = join(directory, "agent-coordinator");
+  const executable = join(directory, "coordinate");
   const marker = join(directory, "unassociated-launch");
   const previousPath = process.env.PATH;
   try {

@@ -57,7 +57,7 @@ func buildBinaries(t *testing.T) *testSandbox {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp(os.TempDir(), "agent-coordinator-integration-")
+	dir, err := os.MkdirTemp(os.TempDir(), "coordinate-integration-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func buildBinaries(t *testing.T) *testSandbox {
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	sandbox := &testSandbox{root: dir, cli: filepath.Join(dir, "agent-coordinator"), fake: filepath.Join(dir, "pi")}
+	sandbox := &testSandbox{root: dir, cli: filepath.Join(dir, "coordinate"), fake: filepath.Join(dir, "pi")}
 	t.Cleanup(func() {
 		if sandbox.preserve {
 			t.Logf("preserved owned integration evidence at %s", sandbox.root)
@@ -78,7 +78,7 @@ func buildBinaries(t *testing.T) *testSandbox {
 	})
 	cli, fake := sandbox.cli, sandbox.fake
 	for _, build := range [][]string{
-		{"build", "-o", cli, "./cmd/agent-coordinator"},
+		{"build", "-o", cli, "./cmd/coordinate"},
 		{"build", "-o", fake, "./internal/testpi"},
 	} {
 		cmd := exec.Command("go", build...)

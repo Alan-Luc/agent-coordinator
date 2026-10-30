@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"agent-coordinator/internal/savedpi"
+	"coordinate/internal/savedpi"
 	"golang.org/x/sys/unix"
 )
 

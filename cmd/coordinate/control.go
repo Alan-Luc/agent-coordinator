@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"agent-coordinator/internal/coordinator"
+	"coordinate/internal/coordinator"
 )
 
 func runControl(ctx context.Context, c *coordinator.Coordinator, args []string, in *os.File, out, errOut io.Writer, fail func(error) int, invalid func(string) int) int {

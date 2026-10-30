@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"agent-coordinator/internal/tmux"
+	"coordinate/internal/tmux"
 	"golang.org/x/sys/unix"
 )
 

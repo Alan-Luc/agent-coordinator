@@ -1,4 +1,4 @@
-module agent-coordinator
+module coordinate
 
 go 1.27.0
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"agent-coordinator/internal/coordinator"
+	"coordinate/internal/coordinator"
 )
 
 func runCommunicationBody(ctx context.Context, c *coordinator.Coordinator, args []string, body []byte, out io.Writer, fail func(error) int, invalid func(string) int) int {

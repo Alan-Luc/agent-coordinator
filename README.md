@@ -1,4 +1,18 @@
-# agent-coordinator
+# Coordinate
+
+## Renaming an existing installation
+
+Build `bin/coordinate` from `cmd/coordinate`, then update the CLI on PATH and the
+Pi package together. Reload/restart Pi only when you choose to activate the new
+`coordinate` tool and `/coordinate` command; no old-name aliases are registered.
+Keep the old installed `agent-coordinator` executable at its recorded absolute
+path while existing jobs or a loaded old extension still reference it. Do not
+replace that binary or restart jobs just for this rename.
+
+State stays under `agent-coordinator` with the same `AC_STATE_DIR`, environment,
+manifest keys, sockets, ownership proofs and task envelope. No migration is
+needed. Renaming the GitHub repository, moving the checkout and updating personal
+package paths or shell aliases are separate operator actions.
 
 A local macOS CLI and Bubble Tea dashboard for independent native Pi sessions.
 Each job has its own hidden tmux server. Closing the dashboard does not stop an
@@ -12,9 +26,9 @@ established session; restarting it discovers existing jobs.
 - Node 22.19+ for the optional Pi extension (development tests use Node 24).
 
 ```sh
-go build -o bin/agent-coordinator ./cmd/agent-coordinator
+go build -o bin/coordinate ./cmd/coordinate
 export PATH="$PWD/bin:$PATH"
-agent-coordinator
+coordinate
 ```
 
 The coordinator executable must have an absolute path containing only letters,
@@ -23,12 +37,12 @@ digits, `_`, `.`, `/`, and `-`, to avoid tmux command-parser ambiguity.
 ## Start interactive Pi with an independent lifetime
 
 ```sh
-agent-coordinator pi
-agent-coordinator pi --model MODEL @image.png
+coordinate pi
+coordinate pi --model MODEL @image.png
 ```
 
 In an ordinary Kitty shell, this starts Pi in a private owned terminal runtime.
-Closing that Kitty client leaves the same Pi running; open `agent-coordinator`
+Closing that Kitty client leaves the same Pi running; open `coordinate`
 from another ordinary Kitty shell and press Enter to reconnect. You do not need
 any tmux commands. Kitty still owns its windows, tabs and splits. This applies
 only to future wrapped starts, not already-running unwrapped Pi.
@@ -37,7 +51,7 @@ Activation is opt-in. After building and separately enabling the compatible Pi
 extension, you can add this interactive-shell alias yourself:
 
 ```sh
-alias pi='/absolute/path/to/agent-coordinator pi'
+alias pi='/absolute/path/to/coordinate pi'
 ```
 
 No installer changes your shell, Pi, Kitty or global tmux settings. Roll back by
@@ -53,7 +67,7 @@ Support limits:
 - Noninteractive/piped modes, help/version and maintenance commands execute Pi
   directly. `--api-key`, `--no-session` and `--no-extensions`/`-ne` also bypass;
   they do not create a retained manageable runtime.
-- Original-client F12 and Ctrl+Z reach Pi. Coordinator Enter reserves F12 Return
+- Original-client F12 and Ctrl+Z reach Pi. Coordinate Enter reserves F12 Return
   for detaching only that client. Ctrl+Z stops Pi rather than returning to a shell;
   use coordinator Continue from another ordinary window to recover.
 - Pi conversation/tool-output scrolling and file/clipboard image input are
@@ -125,13 +139,13 @@ Directories must already exist. Tasks are nonblank UTF-8, at most 1 MiB.
 
 ```sh
 printf '%s\n' 'Inspect the tests and explain what they cover.' |
-  agent-coordinator start inspect --cwd "$PWD" --task-file - --json
-agent-coordinator start another --cwd "$PWD" --task-file /private/path/task.txt
-agent-coordinator list --json
-agent-coordinator list --session-info --json
-agent-coordinator doctor inspect --json
-agent-coordinator enter inspect
-agent-coordinator observe inspect
+  coordinate start inspect --cwd "$PWD" --task-file - --json
+coordinate start another --cwd "$PWD" --task-file /private/path/task.txt
+coordinate list --json
+coordinate list --session-info --json
+coordinate doctor inspect --json
+coordinate enter inspect
+coordinate observe inspect
 ```
 
 Default `start`/`list`/`doctor` JSON retains the legacy response shape for running
@@ -167,7 +181,7 @@ A live terminal or exit status zero is not task success. Readiness remains
 
 ## Optional Pi tool
 
-The repository is a Pi package exposing one typed `coordinator` tool:
+The repository is a Pi package exposing one typed `coordinate` tool:
 
 ```json
 {"request":{"action":"start","name":"inspect","cwd":".","task":"Inspect the tests."}}
@@ -194,7 +208,7 @@ established tmux/Pi job; an interrupted start may still have launched.
 Personal installation is optional and requires your separate authorization:
 
 ```sh
-pi install /absolute/path/to/agent-coordinator
+pi install /absolute/path/to/coordinate
 ```
 
 Then reload/restart Pi. Loading without a session only registers capabilities.
@@ -213,10 +227,10 @@ recorded in Pi's transcript; this is **not** a secret-input channel.
 In an interactive Pi with a persisted conversation, opt in explicitly:
 
 ```text
-/coordinator manage on
-/coordinator adopt WORKER-UUID
-/coordinator release WORKER-UUID
-/coordinator manage off
+/coordinate manage on
+/coordinate adopt WORKER-UUID
+/coordinate release WORKER-UUID
+/coordinate manage off
 ```
 
 Jobs started by an enabled manager are associated before launch. Adoption requires
@@ -265,7 +279,7 @@ model wake-ups. Native prompt observation is partial and may miss brief dialogs;
 stale, startup and unsupported observation is unknown. There is no always-on
 service or desktop-notification delivery while Pi is closed.
 
-Read-only diagnostics: `agent-coordinator messages --json` (page with `--cursor`).
+Read-only diagnostics: `coordinate messages --json` (page with `--cursor`).
 Communication uses a separate private versioned `communication/state.json`;
 unknown schemas fail closed. Limits are 4 KiB UTF-8 publication text, 16 unresolved
 requests per worker, 64 per manager, 16 managers, 128 bindings/messages and a

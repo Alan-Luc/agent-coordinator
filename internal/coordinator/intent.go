@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"agent-coordinator/internal/pilaunch"
+	"coordinate/internal/pilaunch"
 )
 
 const InteractiveProtocolVersion = "2"

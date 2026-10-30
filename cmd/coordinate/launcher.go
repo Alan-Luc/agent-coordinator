@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"agent-coordinator/internal/coordinator"
-	"agent-coordinator/internal/pilaunch"
+	"coordinate/internal/coordinator"
+	"coordinate/internal/pilaunch"
 	"golang.org/x/sys/unix"
 )
 
@@ -18,7 +18,7 @@ const nativeExecMarker = "AC_PI_EXEC_PID"
 
 func runLaunchFeatures(args []string, out, errOut io.Writer) int {
 	if len(args) != 2 || args[1] != "--json" {
-		fmt.Fprintln(errOut, "usage: agent-coordinator _features --json")
+		fmt.Fprintln(errOut, "usage: coordinate _features --json")
 		return 2
 	}
 	features := struct {
@@ -128,6 +128,6 @@ func runPi(ctx context.Context, args []string, in *os.File, out, errOut io.Write
 		fmt.Fprintf(errOut, "attachment failed; Pi may remain live as job %s; inspect list/doctor\n", facts.ID)
 		return 1
 	}
-	fmt.Fprintf(errOut, "Detached from job %s; Pi remains live. Reconnect with agent-coordinator enter %s\n", facts.ID, facts.Name)
+	fmt.Fprintf(errOut, "Detached from job %s; Pi remains live. Reconnect with coordinate enter %s\n", facts.ID, facts.Name)
 	return 0
 }

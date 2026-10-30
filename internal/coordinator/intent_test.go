@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-coordinator/internal/pilaunch"
+	"coordinate/internal/pilaunch"
 )
 
 func TestInteractiveLaunchInput(t *testing.T) {

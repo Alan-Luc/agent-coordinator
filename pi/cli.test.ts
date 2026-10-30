@@ -172,9 +172,9 @@ test("Pi package loader registers coordinator and real CLI actions run fake Pi f
   const capturePath = join(root, "capture.json");
   const releasePath = join(root, "release");
   const spawnMarker = join(root, "coordinator-spawned");
-  const cliBinary = join(bin, "agent-coordinator-real");
+  const cliBinary = join(bin, "coordinate-real");
   const fakePiBinary = join(bin, "pi");
-  const cliPath = join(bin, "agent-coordinator");
+  const cliPath = join(bin, "coordinate");
   let jobId: string | undefined;
   let jobName = "loader-acceptance";
   let socketPath: string | undefined;
@@ -190,7 +190,7 @@ test("Pi package loader registers coordinator and real CLI actions run fake Pi f
   try {
     await Promise.all([bin, agentDir, caller, requestedCwd, state].map((path) => mkdir(path, { recursive: true, mode: 0o700 })));
     await Promise.all([
-      execFile("go", ["build", "-o", cliBinary, "./cmd/agent-coordinator"], { cwd: repositoryRoot, timeout: 60_000, maxBuffer: 8 << 20 }),
+      execFile("go", ["build", "-o", cliBinary, "./cmd/coordinate"], { cwd: repositoryRoot, timeout: 60_000, maxBuffer: 8 << 20 }),
       execFile("go", ["build", "-o", fakePiBinary, "./internal/testpi"], { cwd: repositoryRoot, timeout: 60_000, maxBuffer: 8 << 20 }),
     ]);
     await chmod(cliBinary, 0o700);
@@ -218,7 +218,7 @@ test("Pi package loader registers coordinator and real CLI actions run fake Pi f
     assert.deepEqual(loaded.warnings, [], "host-provided Pi dependencies should not be bundled as runtime dependencies");
     const extension = loaded.extensions.find(({ resolvedPath }) => resolvedPath === join(repositoryRoot, "pi", "index.ts"));
     assert.ok(extension, "package.json pi.extensions entry should resolve through Pi's package loader");
-    const tool = extension.tools.get("coordinator")?.definition;
+    const tool = extension.tools.get("coordinate")?.definition;
     assert.ok(tool, "the loaded extension should register its coordinator tool");
     assert.equal(await lstat(spawnMarker).then(() => true, () => false), false, "loading the package must not spawn the CLI");
 

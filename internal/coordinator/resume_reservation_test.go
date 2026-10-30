@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"agent-coordinator/internal/savedpi"
+	"coordinate/internal/savedpi"
 )
 
 func resumeFixture(t *testing.T, dir, id string) savedpi.Snapshot {

@@ -9,8 +9,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"agent-coordinator/internal/pilaunch"
-	"agent-coordinator/internal/tmux"
+	"coordinate/internal/pilaunch"
+	"coordinate/internal/tmux"
 )
 
 type InteractiveAttachResult struct {

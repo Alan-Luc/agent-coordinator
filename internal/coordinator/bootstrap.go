@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"agent-coordinator/internal/pilaunch"
+	"coordinate/internal/pilaunch"
 	"golang.org/x/sys/unix"
 )
 
