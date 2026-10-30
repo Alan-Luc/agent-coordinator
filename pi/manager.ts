@@ -8,6 +8,7 @@ import { communicationErrorSchema, communicationProtocol, communicationRequestSc
 import { sessionTargetSchema, type SessionStatus, type SessionTarget } from "./control-protocol.ts";
 import { awaitingConversationSchema, launchFeaturesSchema, managerHostRequestSchema, managerHostResultSchema } from "./manager-host-protocol.ts";
 import type { SessionController } from "./session-control.ts";
+import { notifyWorkerPrompt } from "./desktop-notification.ts";
 
 const pollIntervalMs = 2_000;
 const noticeType = "coordinator-communication";
@@ -61,7 +62,7 @@ function sameCaller(left: CommunicationCaller, right: CommunicationCaller | unde
 }
 function error(code: string, message: string, uncertain = false): CommunicationError { return { error: { code, message, uncertain } }; }
 
-export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" | "sendMessage">, controller: SessionController, cli: CommunicationCli): CommunicationAdapter {
+export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" | "sendMessage">, controller: SessionController, cli: CommunicationCli, notifyPrompt: typeof notifyWorkerPrompt = notifyWorkerPrompt): CommunicationAdapter {
   let runtime: Runtime | undefined;
   let sessionInitialization: Promise<void> | undefined;
   let lifecycle = 0;
@@ -425,6 +426,7 @@ export function registerManager(pi: Pick<ExtensionAPI, "on" | "registerCommand" 
         if (!prompt) current.workerPrompts.delete(key);
         else if (marker !== undefined && marker !== previous) {
           current.workerPrompts.set(key, marker);
+          void notifyPrompt(worker.job_id, prompt.kind, current.abort.signal);
           current.context.ui.notify(`Worker ${clean(worker.job_id ?? "worker")} is waiting in its native ${clean(prompt.kind ?? "input")} dialog. Enter that worker session to respond.`, "warning");
         }
       }
